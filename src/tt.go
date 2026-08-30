@@ -12,6 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/faiface/beep"
+	"github.com/faiface/beep/mp3"
+	"github.com/faiface/beep/speaker"
+	"github.com/faiface/beep/wav"
 	"github.com/gdamore/tcell"
 	"github.com/mattn/go-isatty"
 )
@@ -57,6 +61,7 @@ func parseConfig(b []byte) map[string]string {
 }
 
 func exit(rc int) {
+	speaker.Close()
 	scr.Fini()
 
 	if jsonMode {
@@ -197,6 +202,13 @@ Test Parameters
     -highlight1         Only highlight the current word.
     -highlight2         Only highlight the next word.
 
+Sound
+    -sound SOUND        Play SOUND on each keystroke (WAV or MP3).
+                        Built-in and ~/.tt/sounds/ sounds available.
+    -error-sound SOUND  Play SOUND on incorrect keystrokes. If both
+                        -sound and -error-sound are given, correct
+                        keys play -sound and incorrect play -error-sound.
+
 Scripting
     -oneshot            Automatically exit after a single run.
     -noreport           Don't show a report at the end of a test.
@@ -210,7 +222,7 @@ Scripting
 
 Misc
     -list TYPE          Lists internal resources of the given type.
-                        TYPE=[themes|quotes|words]
+                        TYPE=[themes|quotes|words|sounds]
 
 Version
     -v                  Print the current version.
@@ -225,6 +237,60 @@ func saveMistakes(mistakes []mistake) {
 
 	db = append(db, mistakes...)
 	writeValue(MISTAKE_DB, db)
+}
+
+type nopReadCloser struct {
+	*bytes.Reader
+}
+
+func (nopReadCloser) Close() error { return nil }
+
+func loadSound(name string, targetRate beep.SampleRate) (*beep.Buffer, error) {
+	data := readResource("sounds", name)
+
+	if data == nil {
+		data = readResource("sounds", name+".wav")
+	}
+	if data == nil {
+		data = readResource("sounds", name+".mp3")
+	}
+	if data == nil {
+		return nil, fmt.Errorf("sound %q not found (searched ~/.tt/sounds/, /etc/tt/sounds/, and built-in sounds)", name)
+	}
+
+	ext := strings.ToLower(filepath.Ext(name))
+	var streamer beep.StreamSeekCloser
+	var format beep.Format
+	var err error
+
+	switch ext {
+	case ".mp3":
+		streamer, format, err = mp3.Decode(nopReadCloser{bytes.NewReader(data)})
+	case ".wav":
+		streamer, format, err = wav.Decode(bytes.NewReader(data))
+	default:
+		streamer, format, err = wav.Decode(bytes.NewReader(data))
+		if err != nil {
+			streamer, format, err = mp3.Decode(nopReadCloser{bytes.NewReader(data)})
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decode failed: %w", err)
+	}
+	defer streamer.Close()
+
+	var s beep.Streamer = streamer
+	if format.SampleRate != targetRate {
+		s = beep.Resample(3, format.SampleRate, targetRate, streamer)
+	}
+
+	buf := beep.NewBuffer(beep.Format{
+		SampleRate:  targetRate,
+		NumChannels: format.NumChannels,
+		Precision:   format.Precision,
+	})
+	buf.Append(s)
+	return buf, nil
 }
 
 func main() {
@@ -254,6 +320,8 @@ func main() {
 	var multiMode bool
 	var versionFlag bool
 	var boldFlag bool
+	var soundFile string
+	var errorSoundFile string
 
 	var err error
 	var testFn func() []segment
@@ -287,6 +355,8 @@ func main() {
 	flag.BoolVar(&multiMode, "multi", false, "")
 	flag.StringVar(&themeName, "theme", "default", "")
 	flag.StringVar(&listFlag, "list", "", "")
+	flag.StringVar(&soundFile, "sound", "", "")
+	flag.StringVar(&errorSoundFile, "error-sound", "", "")
 
 	flag.Usage = func() { os.Stdout.Write([]byte(usage)) }
 	flag.Parse()
@@ -382,8 +452,34 @@ func main() {
 	typer.BlockCursor = normalCursor
 	typer.ShowWpm = showWpm
 
+	if soundFile != "" || errorSoundFile != "" {
+		const targetRate = beep.SampleRate(44100)
+		var normalBuf, errorBuf *beep.Buffer
+
+		if soundFile != "" {
+			buf, err := loadSound(soundFile, targetRate)
+			if err != nil {
+				die("loading sound file: %s", err)
+			}
+			normalBuf = buf
+		}
+		if errorSoundFile != "" {
+			buf, err := loadSound(errorSoundFile, targetRate)
+			if err != nil {
+				die("loading error-sound file: %s", err)
+			}
+			errorBuf = buf
+		}
+
+		if err := speaker.Init(targetRate, targetRate.N(time.Second/30)); err != nil {
+			die("initializing speaker: %s", err)
+		}
+		typer.soundBuffer = normalBuf
+		typer.errorSoundBuffer = errorBuf
+	}
+
 	if timeout != -1 {
-		timeout *= 1E9
+		timeout *= 1e9
 	}
 
 	var tests [][]segment
@@ -415,7 +511,7 @@ func main() {
 				idx--
 			}
 		case TyperComplete:
-			cpm := int(float64(ncorrect) / (float64(t) / 60E9))
+			cpm := int(float64(ncorrect) / (float64(t) / 60e9))
 			wpm := cpm / 5
 			accuracy := float64(ncorrect) / float64(nerrs+ncorrect) * 100
 

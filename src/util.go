@@ -25,7 +25,7 @@ func init() {
 }
 
 type cell struct {
-	c	  rune
+	c     rune
 	style tcell.Style
 }
 

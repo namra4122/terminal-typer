@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/faiface/beep"
+	"github.com/faiface/beep/speaker"
 	"github.com/gdamore/tcell"
 )
 
@@ -46,6 +48,9 @@ type typer struct {
 	incorrectStyle      tcell.Style
 	correctStyle        tcell.Style
 	defaultStyle        tcell.Style
+
+	soundBuffer      *beep.Buffer
+	errorSoundBuffer *beep.Buffer
 }
 
 func NewTyper(scr tcell.Screen, emboldenTypedText bool, fgcol, bgcol, hicol, hicol2, hicol3, errcol tcell.Color) *typer {
@@ -76,6 +81,18 @@ func NewTyper(scr tcell.Screen, emboldenTypedText bool, fgcol, bgcol, hicol, hic
 		nextWordStyle:       def.Foreground(hicol3),
 		incorrectStyle:      def.Foreground(errcol),
 		incorrectSpaceStyle: def.Background(errcol),
+	}
+}
+
+func (t *typer) playKeySound(correct bool) {
+	if correct && t.soundBuffer != nil {
+		speaker.Play(t.soundBuffer.Streamer(0, t.soundBuffer.Len()))
+	} else if !correct {
+		if t.errorSoundBuffer != nil {
+			speaker.Play(t.errorSoundBuffer.Streamer(0, t.errorSoundBuffer.Len()))
+		} else if t.soundBuffer != nil {
+			speaker.Play(t.soundBuffer.Streamer(0, t.soundBuffer.Len()))
+		}
 	}
 }
 
@@ -386,10 +403,13 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 						if idx < len(text) {
 							typed[idx] = text[idx]
 							idx++
+							t.playKeySound(true)
 						}
 					} else {
+						correct := ev.Rune() == text[idx]
 						typed[idx] = ev.Rune()
 						idx++
+						t.playKeySound(correct)
 					}
 
 					for idx < len(text) && text[idx] == '\n' {
