@@ -4,3 +4,4 @@ bin/
 *.swo
 tags
 .DS_Store
+*.gz
