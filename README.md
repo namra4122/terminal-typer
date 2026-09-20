@@ -30,15 +30,20 @@ sudo rm /usr/local/bin/tt /usr/share/man/man1/tt.1.gz
 
 ## From source
 
-```
-# debian dependencies
-sudo apt install golang
+Requires Go 1.17 or newer. To install the optional manual page, `make install`
+also requires Pandoc and gzip.
 
-# clone and make
+```
 git clone https://github.com/lemnos/tt
 cd tt
-make && sudo make install
+go mod download
+make build
+./bin/tt
 ```
+
+Run `make install` to install the binary and generated `tt(1)` manual under
+`/usr/local` (override with `PREFIX` or `DESTDIR`). Contributors should run
+`make verify` and `make smoke`; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Best served on a terminal with truecolor and cursor shape support (e.g kitty, iterm)
 
