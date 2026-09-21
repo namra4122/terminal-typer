@@ -407,9 +407,9 @@ const (
 	// settingsMinimumWidth and settingsMinimumHeight retain the modal's
 	// established input gate. Below this size the modal remains read-only so
 	// users cannot accidentally edit settings while the panel is unreadable.
-	settingsMinimumWidth  = 52
-	settingsMinimumHeight = 14
-	settingsPanelMaxWidth = 72
+	settingsMinimumWidth   = 52
+	settingsMinimumHeight  = 14
+	settingsPanelMaxWidth  = 72
 	settingsPanelMaxHeight = 16
 )
 

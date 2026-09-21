@@ -11,19 +11,19 @@ import (
 // are included so a parent layout can build shared separators without joining
 // two independent boxes and producing doubled borders.
 type Border struct {
-	Top          rune
-	Bottom       rune
-	Left         rune
-	Right        rune
-	TopLeft      rune
-	TopRight     rune
-	BottomLeft   rune
-	BottomRight  rune
-	LeftJoin     rune
-	RightJoin    rune
-	TopJoin      rune
-	BottomJoin   rune
-	Cross        rune
+	Top         rune
+	Bottom      rune
+	Left        rune
+	Right       rune
+	TopLeft     rune
+	TopRight    rune
+	BottomLeft  rune
+	BottomRight rune
+	LeftJoin    rune
+	RightJoin   rune
+	TopJoin     rune
+	BottomJoin  rune
+	Cross       rune
 }
 
 // NormalBorder returns the thin square border used for ordinary panes.
