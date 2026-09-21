@@ -366,7 +366,6 @@ func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, over
 		screen.SetContent(x, y+line, '|', nil, tcell.StyleDefault)
 		screen.SetContent(x+width-1, y+line, '|', nil, tcell.StyleDefault)
 	}
-
 	drawString(screen, x+(width-len("Settings"))/2, y+1, "Settings", -1, tcell.StyleDefault.Bold(true))
 	active := effectiveRuntimeSettings(draft, overrides, flags)
 	for row, label := range settingsLabels {
@@ -374,9 +373,13 @@ func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, over
 		if row == selected {
 			marker = ">"
 		}
-		line := fmt.Sprintf("%s %-20s %s", marker, label, settingValue(active, row))
+		line := fmt.Sprintf("%s %s: %s", marker, label, settingValue(active, row))
 		if settingIsOverridden(row, overrides) {
-			line += fmt.Sprintf("  CLI override; Saved: %s", settingValue(draft, row))
+			line += "  CLI override"
+			if row == selected {
+				savedValue := "Saved: " + settingValue(draft, row)
+				drawString(screen, x+(width-len(savedValue))/2, y+2, savedValue, -1, tcell.StyleDefault)
+			}
 		}
 		drawString(screen, x+2, y+3+row, line, -1, tcell.StyleDefault)
 	}
@@ -397,6 +400,7 @@ func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides setting
 	draft := *saved
 	dirty := make(map[int]bool)
 	selected := 0
+	original := *saved
 	message := ""
 
 	for {
@@ -444,11 +448,19 @@ func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides setting
 					continue
 				}
 				advanceSetting(&draft, selected)
-				dirty[selected] = true
+				if settingValue(draft, selected) == settingValue(original, selected) {
+					delete(dirty, selected)
+				} else {
+					dirty[selected] = true
+				}
 				message = ""
 			case tcell.KeyEnter:
 				advanceSetting(&draft, selected)
-				dirty[selected] = true
+				if settingValue(draft, selected) == settingValue(original, selected) {
+					delete(dirty, selected)
+				} else {
+					dirty[selected] = true
+				}
 				message = ""
 			}
 		}

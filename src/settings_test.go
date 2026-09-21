@@ -289,6 +289,10 @@ func TestTypingStateAndTimeSurviveSettingsModal(t *testing.T) {
 	if got.duration != 2*time.Second {
 		t.Fatalf("typing duration = %s, want 2s excluding 10s modal interval", got.duration)
 	}
+	_, _, resumedStyle, _ := screen.GetContent(0, 0)
+	if resumedStyle != typer.defaultStyle {
+		t.Fatal("typing screen did not restore its themed default style after Settings")
+	}
 }
 
 func TestInvalidRuntimeSettingsWarnOnceAndUseDefaults(t *testing.T) {
@@ -413,6 +417,64 @@ func TestSettingsModalSaveFailureRemainsOpenAndDoesNotApply(t *testing.T) {
 		t.Fatalf("save failure was not rendered in modal:\n%s", rendered)
 	}
 }
+func TestSettingsModalDoesNotSaveRevertedDraft(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	originalPath := RUNTIME_SETTINGS_DB
+	RUNTIME_SETTINGS_DB = path
+	defer func() { RUNTIME_SETTINGS_DB = originalPath }()
+
+	saved := defaultRuntimeSettings()
+	screen := newSettingsTestScreen(t, 80, 24)
+	defer screen.Fini()
+	result := make(chan [2]bool, 1)
+	go func() {
+		committed, interrupted := showSettings(screen, &saved, settingsOverrides{}, flagValues{})
+		result <- [2]bool{committed, interrupted}
+	}()
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyRune, ' ', tcell.ModNone))
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyRune, ' ', tcell.ModNone))
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+
+	if got := <-result; got != [2]bool{false, false} {
+		t.Fatalf("modal result = %v, want unchanged close", got)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("settings file exists after reverting the draft: %v", err)
+	}
+}
+
+func TestSettingsModalFitsHighlightOverrideAtMinimumSize(t *testing.T) {
+	originalPath := RUNTIME_SETTINGS_DB
+	RUNTIME_SETTINGS_DB = filepath.Join(t.TempDir(), "settings.json")
+	defer func() { RUNTIME_SETTINGS_DB = originalPath }()
+
+	saved := defaultRuntimeSettings()
+	saved.Highlight = highlightOff
+	overrides := settingsOverrides{Highlight: true}
+	flags := flagValues{Highlight: highlightCurrentAndNext}
+	screen := newSettingsTestScreen(t, 52, 14)
+	defer screen.Fini()
+	result := make(chan [2]bool, 1)
+	go func() {
+		committed, interrupted := showSettings(screen, &saved, overrides, flags)
+		result <- [2]bool{committed, interrupted}
+	}()
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	screen.PostEventWait(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone))
+
+	if got := <-result; got != [2]bool{false, false} {
+		t.Fatalf("modal result = %v, want unchanged close", got)
+	}
+	rendered := simulationText(screen)
+	for _, text := range []string{
+		"Word highlighting: Current + next  CLI override",
+		"Saved: Off",
+	} {
+		if !strings.Contains(rendered, text) {
+			t.Errorf("minimum-size modal does not contain %q:\n%s", text, rendered)
+		}
+	}
+}
 
 func TestSettingsModalRendersRowsAndConsumesTypingKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
@@ -439,7 +501,7 @@ func TestSettingsModalRendersRowsAndConsumesTypingKeys(t *testing.T) {
 		t.Fatalf("modal result = %v, want unchanged close", got)
 	}
 	rendered := simulationText(screen)
-	for _, text := range append(settingsLabels[:], "Settings", "CLI override; Saved: Off", "Up/Down select · Space/Enter change", "Esc/Ctrl-P save & close") {
+	for _, text := range append(settingsLabels[:], "Settings", "CLI override", "Saved: Off", "Up/Down select · Space/Enter change", "Esc/Ctrl-P save & close") {
 		if !strings.Contains(rendered, text) {
 			t.Errorf("modal does not contain %q:\n%s", text, rendered)
 		}

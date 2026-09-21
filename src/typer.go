@@ -393,6 +393,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 				if committed {
 					t.applyRuntimeSettings()
 				}
+				t.Scr.SetStyle(t.defaultStyle)
 				t.Scr.Clear()
 				continue
 			}
