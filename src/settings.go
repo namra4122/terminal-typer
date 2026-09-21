@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gdamore/tcell"
 )
@@ -444,46 +445,182 @@ func drawSettingsFallback(screen tcell.Screen) {
 	DrawText(screen, x, y, message, DefaultStyles.Warning)
 }
 
+func settingsRowStyle(style tcell.Style, selected bool) tcell.Style {
+	if selected {
+		return style.Background(DefaultTheme.SelectedBG)
+	}
+	return style
+}
+
+func settingDisplayValue(setting SettingRow, value string) string {
+	if setting.Kind != SettingBoolean {
+		return value
+	}
+	if value == "On" {
+		return "● On"
+	}
+	return "○ Off"
+}
+
 func drawSettingsRow(screen tcell.Screen, content Rect, row, selected int, active runtimeSettings, overrides settingsOverrides) {
 	if row < 0 || row >= len(settingsRows) || content.Width <= 0 || content.Height <= 0 {
 		return
 	}
+	drawSettingsRowAt(screen, content, content.Y+row, row, selected, active, overrides)
+}
+
+func drawSettingsRowAt(screen tcell.Screen, content Rect, y, row, selected int, active runtimeSettings, overrides settingsOverrides) {
+	if row < 0 || row >= len(settingsRows) || content.Width <= 0 {
+		return
+	}
 
 	setting := settingsRows[row]
-	marker := "  "
-	if row == selected {
-		marker = "> "
-	}
-	label := marker + setting.Label
-	labelWidth := CellWidth(label)
-	valueWidth := content.Width - labelWidth - 1
+	isSelected := row == selected
+	rowStyle := settingsRowStyle(DefaultStyles.Text, isSelected)
+	// Paint the complete content width first. This makes selection readable even
+	// when the label is short and keeps the accent state stable as values change.
+	DrawTextInRect(screen, Rect{X: content.X, Y: y, Width: content.Width, Height: 1},
+		PadCells("", content.Width), rowStyle)
+
+	value := settingDisplayValue(setting, settingValue(active, row))
+	valueWidth := CellWidth(value)
 	if valueWidth < 1 {
 		valueWidth = 1
-		labelWidth = content.Width - 2
-		if labelWidth < 1 {
-			labelWidth = 1
+	}
+	if valueWidth > content.Width-2 {
+		valueWidth = content.Width - 2
+		if valueWidth < 1 {
+			valueWidth = 1
 		}
-		label = TruncateCells(label, labelWidth)
 	}
 
-	value := settingValue(active, row)
-	if settingIsOverridden(row, overrides) && valueWidth >= CellWidth(value)+2 {
-		value += " *"
+	status := ""
+	if settingIsOverridden(row, overrides) {
+		status = "CLI override"
 	}
-	value = AlignRightCells(value, valueWidth)
+	statusWidth := CellWidth(status)
+	labelWidth := content.Width - 2 - valueWidth - 1
+	if statusWidth > 0 {
+		labelWidth -= statusWidth + 1
+	}
+	// Keep the value visible first, then drop status before allowing a
+	// malformed narrow write. The full gate remains intentionally 52x14.
+	if labelWidth < 1 && statusWidth > 0 {
+		status = ""
+		statusWidth = 0
+		labelWidth = content.Width - 2 - valueWidth - 1
+	}
+	if labelWidth < 1 {
+		labelWidth = 1
+		valueWidth = content.Width - 3
+		if valueWidth < 1 {
+			valueWidth = 1
+		}
+	}
 
+	marker := "  "
+	if isSelected {
+		marker = "› "
+	}
+	DrawTextInRect(screen, Rect{X: content.X, Y: y, Width: 2, Height: 1}, marker,
+		settingsRowStyle(DefaultStyles.Indicator, isSelected))
+
+	label := TruncateCells(setting.Label, labelWidth)
+	labelStyle := DefaultStyles.Text
+	if isSelected {
+		labelStyle = DefaultStyles.SelectedRow
+	}
 	DrawTextInRect(screen, Rect{
-		X:      content.X,
-		Y:      content.Y + row,
-		Width:  labelWidth,
-		Height: 1,
-	}, label, DefaultStyles.Text)
-	DrawTextInRect(screen, Rect{
-		X:      content.X + labelWidth + 1,
-		Y:      content.Y + row,
-		Width:  valueWidth,
-		Height: 1,
-	}, value, DefaultStyles.Value)
+		X: content.X + 2, Y: y, Width: labelWidth, Height: 1,
+	}, label, settingsRowStyle(labelStyle, isSelected))
+
+	valueX := content.X + content.Width - valueWidth
+	valueStyle := DefaultStyles.Value
+	if setting.Kind == SettingBoolean {
+		if strings.HasPrefix(value, "●") {
+			valueStyle = DefaultStyles.Success
+		} else {
+			valueStyle = DefaultStyles.Muted
+		}
+	} else if isSelected {
+		valueStyle = DefaultStyles.Key
+	}
+	valueStyle = settingsRowStyle(valueStyle, isSelected)
+	DrawTextInRect(screen, Rect{X: valueX, Y: y, Width: valueWidth, Height: 1},
+		AlignRightCells(value, valueWidth), valueStyle)
+
+	if status != "" {
+		statusX := valueX - statusWidth - 1
+		if statusX < content.X+2+labelWidth+1 {
+			availableStatus := valueX - (content.X + 2 + labelWidth + 1)
+			if availableStatus < 1 {
+				availableStatus = 1
+			}
+			status = TruncateCells(status, availableStatus)
+			statusWidth = CellWidth(status)
+			statusX = valueX - statusWidth - 1
+		}
+		if statusWidth > 0 {
+			DrawTextInRect(screen, Rect{X: statusX, Y: y, Width: statusWidth, Height: 1},
+				status, settingsRowStyle(DefaultStyles.Subtle, isSelected))
+		}
+	}
+}
+
+func drawSettingsFooter(screen tcell.Screen, content Rect, y int) {
+	if content.Width <= 0 {
+		return
+	}
+	DrawRule(screen, content.X, y, content.Width, '─', DefaultStyles.Border)
+	if content.Height < 2 {
+		return
+	}
+
+	type hint struct {
+		key, action string
+	}
+	hints := []hint{
+		{"↑↓", "Navigate"},
+		{"Space", "Toggle"},
+		{"Enter", "Change"},
+		{"Esc", "Close"},
+	}
+	if content.Width < 56 {
+		hints = []hint{
+			{"↑↓", "Select"},
+			{"Space/Enter", "Apply"},
+			{"Esc", "Close"},
+		}
+	}
+
+	x := content.X
+	end := content.X + content.Width
+	for i, item := range hints {
+		separator := 0
+		if i > 0 {
+			separator = CellWidth(" · ")
+		}
+		needed := separator + CellWidth(item.key) + 1 + CellWidth(item.action)
+		if x+needed > end {
+			break
+		}
+		if i > 0 {
+			DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: 3, Height: 1},
+				" · ", DefaultStyles.Subtle)
+			x += separator
+		}
+		keyWidth := CellWidth(item.key)
+		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: keyWidth, Height: 1},
+			item.key, DefaultStyles.Key)
+		x += keyWidth
+		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: 1, Height: 1},
+			" ", DefaultStyles.FooterText)
+		x++
+		actionWidth := CellWidth(item.action)
+		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: actionWidth, Height: 1},
+			item.action, DefaultStyles.FooterText)
+		x += actionWidth
+	}
 }
 
 func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, overrides settingsOverrides, flags flagValues, message string) {
@@ -506,68 +643,54 @@ func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, over
 		return
 	}
 
-	// Keep a single cell of horizontal breathing room when possible. Vertical
-	// padding is deliberately compact so all settings remain available before
-	// optional help is removed on short terminals.
 	paddingX := 2
 	if inner.Width < 40 {
 		paddingX = 1
 	}
 	content := Rect{
 		X:      inner.X + paddingX,
-		Y:      inner.Y + 1,
+		Y:      inner.Y,
 		Width:  inner.Width - paddingX*2,
-		Height: inner.Height - 2,
+		Height: inner.Height,
 	}
 	if content.Width <= 0 || content.Height <= 0 {
 		screen.Show()
 		return
 	}
 
+	active := effectiveRuntimeSettings(draft, overrides, flags)
+	subtitle := "Configure typing behavior and appearance"
+	subtitleStyle := DefaultStyles.Subtitle
+	if message != "" {
+		subtitle = "Error: " + message
+		subtitleStyle = DefaultStyles.Error
+	} else if selected >= 0 && selected < len(settingsRows) && settingIsOverridden(selected, overrides) {
+		subtitle = "Saved: " + settingValue(draft, selected) + " · CLI override"
+	}
 	DrawTextInRect(screen, Rect{X: content.X, Y: content.Y, Width: content.Width, Height: 1},
 		"Settings", DefaultStyles.AppTitle)
-
-	active := effectiveRuntimeSettings(draft, overrides, flags)
-	rowsY := content.Y + 1
-	rowsHeight := content.Height - 1
-	if rowsHeight > settingsRowCount {
-		rowsHeight = settingsRowCount
-	}
-	for row := 0; row < rowsHeight; row++ {
-		drawSettingsRow(screen, Rect{
-			X:      content.X,
-			Y:      rowsY,
-			Width:  content.Width,
-			Height: rowsHeight,
-		}, row, selected, active, overrides)
+	if content.Height > 1 {
+		DrawTextInRect(screen, Rect{X: content.X, Y: content.Y + 1, Width: content.Width, Height: 1},
+			subtitle, subtitleStyle)
 	}
 
-	nextY := rowsY + rowsHeight
-	remaining := content.Y + content.Height - nextY
-	if message != "" && remaining > 0 {
-		DrawTextInRect(screen, Rect{
-			X:      content.X,
-			Y:      nextY,
-			Width:  content.Width,
-			Height: 1,
-		}, "Error: "+message, DefaultStyles.Error)
+	footerY := content.Y + content.Height - 2
+	bodyBottom := footerY
+	nextY := content.Y + 2
+	for row := 0; row < len(settingsRows) && nextY < bodyBottom; {
+		section := settingsRows[row].Section
+		DrawTextInRect(screen, Rect{X: content.X, Y: nextY, Width: content.Width, Height: 1},
+			strings.ToUpper(section), DefaultStyles.SectionTitle)
 		nextY++
-		remaining--
-	}
-
-	help := []string{"↑↓ Select · Space/Enter Change", "Esc/Ctrl-P Save & Close"}
-	for _, line := range help {
-		if remaining <= 0 {
-			break
+		for row < len(settingsRows) && settingsRows[row].Section == section && nextY < bodyBottom {
+			drawSettingsRowAt(screen, content, nextY, row, selected, active, overrides)
+			nextY++
+			row++
 		}
-		DrawTextInRect(screen, Rect{
-			X:      content.X,
-			Y:      nextY,
-			Width:  content.Width,
-			Height: 1,
-		}, line, DefaultStyles.FooterText)
-		nextY++
-		remaining--
+	}
+
+	if footerY >= content.Y && footerY+1 < content.Y+content.Height {
+		drawSettingsFooter(screen, content, footerY)
 	}
 	screen.Show()
 }
