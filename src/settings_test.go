@@ -467,7 +467,9 @@ func TestSettingsModalFitsHighlightOverrideAtMinimumSize(t *testing.T) {
 	}
 	rendered := simulationText(screen)
 	for _, text := range []string{
-		"Word highlighting: Current + next  CLI override",
+		"Word highlighti…",
+		"Current + next",
+		"CLI override",
 		"Saved: Off",
 	} {
 		if !strings.Contains(rendered, text) {
@@ -501,7 +503,7 @@ func TestSettingsModalRendersRowsAndConsumesTypingKeys(t *testing.T) {
 		t.Fatalf("modal result = %v, want unchanged close", got)
 	}
 	rendered := simulationText(screen)
-	for _, text := range append(settingsLabels[:], "Settings", "CLI override", "Saved: Off", "Up/Down select · Space/Enter change", "Esc/Ctrl-P save & close") {
+	for _, text := range append(settingsLabels[:], "Settings", "CLI override", "Saved: Off", "Navigate", "Toggle", "Change", "Close") {
 		if !strings.Contains(rendered, text) {
 			t.Errorf("modal does not contain %q:\n%s", text, rendered)
 		}
