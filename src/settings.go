@@ -224,75 +224,134 @@ const (
 	settingsRowCount
 )
 
-var settingsLabels = [settingsRowCount]string{
-	"Show WPM",
-	"Skip word on Space",
-	"Allow Backspace",
-	"Cursor style",
-	"Typed text weight",
-	"Word highlighting",
+// SettingKind describes the value shape a settings row presents to a renderer.
+// The kind is intentionally independent from the formatter so layout code can
+// choose generic affordances without knowing the runtime settings fields.
+type SettingKind int
+
+const (
+	SettingBoolean SettingKind = iota
+	SettingEnum
+	SettingText
+)
+
+// SettingRow contains the declarative metadata needed to render one setting.
+// FormatValue is evaluated against either the effective or saved settings,
+// depending on which value a renderer wants to present.
+type SettingRow struct {
+	Label        string
+	Section      string
+	Kind         SettingKind
+	FormatValue  func(runtimeSettings) string
+	IsOverridden func(settingsOverrides) bool
 }
 
-func settingIsOverridden(row int, overrides settingsOverrides) bool {
-	switch row {
-	case settingShowWPM:
-		return overrides.ShowWPM
-	case settingSkipWord:
-		return overrides.SkipWord
-	case settingAllowBackspace:
-		return overrides.AllowBackspace
-	case settingCursorStyle:
-		return overrides.BlockCursor
-	case settingTypedTextWeight:
-		return overrides.BoldTypedText
-	case settingWordHighlighting:
-		return overrides.Highlight
+const (
+	settingsSectionGeneral    = "General"
+	settingsSectionAppearance = "Appearance"
+)
+
+func formatToggle(value bool) string {
+	if value {
+		return "On"
+	}
+	return "Off"
+}
+
+func formatCursorStyle(settings runtimeSettings) string {
+	if settings.BlockCursor {
+		return "Block"
+	}
+	return "Bar"
+}
+
+func formatTypedTextWeight(settings runtimeSettings) string {
+	if settings.BoldTypedText {
+		return "Bold"
+	}
+	return "Normal"
+}
+
+func formatWordHighlighting(settings runtimeSettings) string {
+	switch settings.Highlight {
+	case highlightCurrentOnly:
+		return "Current only"
+	case highlightNextOnly:
+		return "Next only"
+	case highlightOff:
+		return "Off"
 	default:
+		return "Current + next"
+	}
+}
+
+var settingsRows = [settingsRowCount]SettingRow{
+	{
+		Label:        "Show WPM",
+		Section:      settingsSectionGeneral,
+		Kind:         SettingBoolean,
+		FormatValue:  func(settings runtimeSettings) string { return formatToggle(settings.ShowWPM) },
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.ShowWPM },
+	},
+	{
+		Label:        "Skip word on Space",
+		Section:      settingsSectionGeneral,
+		Kind:         SettingBoolean,
+		FormatValue:  func(settings runtimeSettings) string { return formatToggle(settings.SkipWord) },
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.SkipWord },
+	},
+	{
+		Label:        "Allow Backspace",
+		Section:      settingsSectionGeneral,
+		Kind:         SettingBoolean,
+		FormatValue:  func(settings runtimeSettings) string { return formatToggle(settings.AllowBackspace) },
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.AllowBackspace },
+	},
+	{
+		Label:        "Cursor style",
+		Section:      settingsSectionAppearance,
+		Kind:         SettingEnum,
+		FormatValue:  formatCursorStyle,
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.BlockCursor },
+	},
+	{
+		Label:        "Typed text weight",
+		Section:      settingsSectionAppearance,
+		Kind:         SettingEnum,
+		FormatValue:  formatTypedTextWeight,
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.BoldTypedText },
+	},
+	{
+		Label:        "Word highlighting",
+		Section:      settingsSectionAppearance,
+		Kind:         SettingEnum,
+		FormatValue:  formatWordHighlighting,
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.Highlight },
+	},
+}
+
+// settingsLabels remains as a compatibility view for callers that only need
+// labels. The row descriptors above are the single source of label metadata.
+var settingsLabels = func() [settingsRowCount]string {
+	var labels [settingsRowCount]string
+	for row, setting := range settingsRows {
+		labels[row] = setting.Label
+	}
+	return labels
+}()
+
+func settingIsOverridden(row int, overrides settingsOverrides) bool {
+	if row < 0 || row >= len(settingsRows) {
 		return false
 	}
+	return settingsRows[row].IsOverridden(overrides)
 }
 
 func settingValue(settings runtimeSettings, row int) string {
-	switch row {
-	case settingShowWPM:
-		if settings.ShowWPM {
-			return "On"
-		}
-		return "Off"
-	case settingSkipWord:
-		if settings.SkipWord {
-			return "On"
-		}
-		return "Off"
-	case settingAllowBackspace:
-		if settings.AllowBackspace {
-			return "On"
-		}
-		return "Off"
-	case settingCursorStyle:
-		if settings.BlockCursor {
-			return "Block"
-		}
-		return "Bar"
-	case settingTypedTextWeight:
-		if settings.BoldTypedText {
-			return "Bold"
-		}
-		return "Normal"
-	case settingWordHighlighting:
-		switch settings.Highlight {
-		case highlightCurrentOnly:
-			return "Current only"
-		case highlightNextOnly:
-			return "Next only"
-		case highlightOff:
-			return "Off"
-		default:
-			return "Current + next"
-		}
-	default:
+	if row < 0 || row >= len(settingsRows) {
 		return ""
 	}
+	return settingsRows[row].FormatValue(settings)
 }
 
 func advanceSetting(settings *runtimeSettings, row int) {
@@ -368,12 +427,12 @@ func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, over
 	}
 	drawString(screen, x+(width-len("Settings"))/2, y+1, "Settings", -1, tcell.StyleDefault.Bold(true))
 	active := effectiveRuntimeSettings(draft, overrides, flags)
-	for row, label := range settingsLabels {
+	for row, setting := range settingsRows {
 		marker := " "
 		if row == selected {
 			marker = ">"
 		}
-		line := fmt.Sprintf("%s %s: %s", marker, label, settingValue(active, row))
+		line := fmt.Sprintf("%s %s: %s", marker, setting.Label, settingValue(active, row))
 		if settingIsOverridden(row, overrides) {
 			line += "  CLI override"
 			if row == selected {
