@@ -434,7 +434,7 @@ func settingsPanelRect(screenWidth, screenHeight int) (Rect, bool) {
 	}, true
 }
 
-func drawSettingsFallback(screen tcell.Screen) {
+func drawSettingsFallback(screen tcell.Screen, styles Styles) {
 	screenWidth, screenHeight := screen.Size()
 	message := TruncateCells("Terminal too small for settings (need 52x14)", screenWidth)
 	x := (screenWidth - CellWidth(message)) / 2
@@ -442,12 +442,13 @@ func drawSettingsFallback(screen tcell.Screen) {
 		x = 0
 	}
 	y := screenHeight / 2
-	DrawText(screen, x, y, message, DefaultStyles.Warning)
+	DrawText(screen, x, y, message, styles.Warning)
 }
 
-func settingsRowStyle(style tcell.Style, selected bool) tcell.Style {
+func settingsRowStyle(style tcell.Style, selected bool, styles Styles) tcell.Style {
 	if selected {
-		return style.Background(DefaultTheme.SelectedBG)
+		_, selectedBG, _ := styles.SelectedRow.Decompose()
+		return style.Background(selectedBG)
 	}
 	return style
 }
@@ -462,21 +463,21 @@ func settingDisplayValue(setting SettingRow, value string) string {
 	return "○ Off"
 }
 
-func drawSettingsRow(screen tcell.Screen, content Rect, row, selected int, active runtimeSettings, overrides settingsOverrides) {
+func drawSettingsRow(screen tcell.Screen, content Rect, row, selected int, active runtimeSettings, overrides settingsOverrides, styles Styles) {
 	if row < 0 || row >= len(settingsRows) || content.Width <= 0 || content.Height <= 0 {
 		return
 	}
-	drawSettingsRowAt(screen, content, content.Y+row, row, selected, active, overrides)
+	drawSettingsRowAt(screen, content, content.Y+row, row, selected, active, overrides, styles)
 }
 
-func drawSettingsRowAt(screen tcell.Screen, content Rect, y, row, selected int, active runtimeSettings, overrides settingsOverrides) {
+func drawSettingsRowAt(screen tcell.Screen, content Rect, y, row, selected int, active runtimeSettings, overrides settingsOverrides, styles Styles) {
 	if row < 0 || row >= len(settingsRows) || content.Width <= 0 {
 		return
 	}
 
 	setting := settingsRows[row]
 	isSelected := row == selected
-	rowStyle := settingsRowStyle(DefaultStyles.Text, isSelected)
+	rowStyle := settingsRowStyle(styles.Text, isSelected, styles)
 	// Paint the complete content width first. This makes selection readable even
 	// when the label is short and keeps the accent state stable as values change.
 	DrawTextInRect(screen, Rect{X: content.X, Y: y, Width: content.Width, Height: 1},
@@ -523,29 +524,29 @@ func drawSettingsRowAt(screen tcell.Screen, content Rect, y, row, selected int, 
 		marker = "› "
 	}
 	DrawTextInRect(screen, Rect{X: content.X, Y: y, Width: 2, Height: 1}, marker,
-		settingsRowStyle(DefaultStyles.Indicator, isSelected))
+		settingsRowStyle(styles.Indicator, isSelected, styles))
 
 	label := TruncateCells(setting.Label, labelWidth)
-	labelStyle := DefaultStyles.Text
+	labelStyle := styles.Text
 	if isSelected {
-		labelStyle = DefaultStyles.SelectedRow
+		labelStyle = styles.SelectedRow
 	}
 	DrawTextInRect(screen, Rect{
 		X: content.X + 2, Y: y, Width: labelWidth, Height: 1,
-	}, label, settingsRowStyle(labelStyle, isSelected))
+	}, label, settingsRowStyle(labelStyle, isSelected, styles))
 
 	valueX := content.X + content.Width - valueWidth
-	valueStyle := DefaultStyles.Value
+	valueStyle := styles.Value
 	if setting.Kind == SettingBoolean {
 		if strings.HasPrefix(value, "●") {
-			valueStyle = DefaultStyles.Success
+			valueStyle = styles.Success
 		} else {
-			valueStyle = DefaultStyles.Muted
+			valueStyle = styles.Muted
 		}
 	} else if isSelected {
-		valueStyle = DefaultStyles.Key
+		valueStyle = styles.Key
 	}
-	valueStyle = settingsRowStyle(valueStyle, isSelected)
+	valueStyle = settingsRowStyle(valueStyle, isSelected, styles)
 	DrawTextInRect(screen, Rect{X: valueX, Y: y, Width: valueWidth, Height: 1},
 		AlignRightCells(value, valueWidth), valueStyle)
 
@@ -562,16 +563,16 @@ func drawSettingsRowAt(screen tcell.Screen, content Rect, y, row, selected int, 
 		}
 		if statusWidth > 0 {
 			DrawTextInRect(screen, Rect{X: statusX, Y: y, Width: statusWidth, Height: 1},
-				status, settingsRowStyle(DefaultStyles.Subtle, isSelected))
+				status, settingsRowStyle(styles.Subtle, isSelected, styles))
 		}
 	}
 }
 
-func drawSettingsFooter(screen tcell.Screen, content Rect, y int) {
+func drawSettingsFooter(screen tcell.Screen, content Rect, y int, styles Styles) {
 	if content.Width <= 0 {
 		return
 	}
-	DrawRule(screen, content.X, y, content.Width, '─', DefaultStyles.Border)
+	DrawRule(screen, content.X, y, content.Width, '─', styles.Border)
 	if content.Height < 2 {
 		return
 	}
@@ -606,37 +607,37 @@ func drawSettingsFooter(screen tcell.Screen, content Rect, y int) {
 		}
 		if i > 0 {
 			DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: 3, Height: 1},
-				" · ", DefaultStyles.Subtle)
+				" · ", styles.Subtle)
 			x += separator
 		}
 		keyWidth := CellWidth(item.key)
 		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: keyWidth, Height: 1},
-			item.key, DefaultStyles.Key)
+			item.key, styles.Key)
 		x += keyWidth
 		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: 1, Height: 1},
-			" ", DefaultStyles.FooterText)
+			" ", styles.FooterText)
 		x++
 		actionWidth := CellWidth(item.action)
 		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: actionWidth, Height: 1},
-			item.action, DefaultStyles.FooterText)
+			item.action, styles.FooterText)
 		x += actionWidth
 	}
 }
 
-func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, overrides settingsOverrides, flags flagValues, message string) {
+func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, overrides settingsOverrides, flags flagValues, message string, styles Styles) {
 	screen.Clear()
 	screen.HideCursor()
-	screen.SetStyle(DefaultStyles.Text)
+	screen.SetStyle(styles.Text)
 
 	screenWidth, screenHeight := screen.Size()
 	panel, ok := settingsPanelRect(screenWidth, screenHeight)
 	if !ok {
-		drawSettingsFallback(screen)
+		drawSettingsFallback(screen, styles)
 		screen.Show()
 		return
 	}
 
-	DrawBox(screen, panel, NormalBorder(), DefaultStyles.Border)
+	DrawBox(screen, panel, NormalBorder(), styles.Border)
 	inner := panel.Inset(1)
 	if inner.Width <= 0 || inner.Height <= 0 {
 		screen.Show()
@@ -660,15 +661,15 @@ func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, over
 
 	active := effectiveRuntimeSettings(draft, overrides, flags)
 	subtitle := "Configure typing behavior and appearance"
-	subtitleStyle := DefaultStyles.Subtitle
+	subtitleStyle := styles.Subtitle
 	if message != "" {
 		subtitle = "Error: " + message
-		subtitleStyle = DefaultStyles.Error
+		subtitleStyle = styles.Error
 	} else if selected >= 0 && selected < len(settingsRows) && settingIsOverridden(selected, overrides) {
 		subtitle = "Saved: " + settingValue(draft, selected) + " · CLI override"
 	}
 	DrawTextInRect(screen, Rect{X: content.X, Y: content.Y, Width: content.Width, Height: 1},
-		"Settings", DefaultStyles.AppTitle)
+		"Settings", styles.AppTitle)
 	if content.Height > 1 {
 		DrawTextInRect(screen, Rect{X: content.X, Y: content.Y + 1, Width: content.Width, Height: 1},
 			subtitle, subtitleStyle)
@@ -680,22 +681,26 @@ func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, over
 	for row := 0; row < len(settingsRows) && nextY < bodyBottom; {
 		section := settingsRows[row].Section
 		DrawTextInRect(screen, Rect{X: content.X, Y: nextY, Width: content.Width, Height: 1},
-			strings.ToUpper(section), DefaultStyles.SectionTitle)
+			strings.ToUpper(section), styles.SectionTitle)
 		nextY++
 		for row < len(settingsRows) && settingsRows[row].Section == section && nextY < bodyBottom {
-			drawSettingsRowAt(screen, content, nextY, row, selected, active, overrides)
+			drawSettingsRowAt(screen, content, nextY, row, selected, active, overrides, styles)
 			nextY++
 			row++
 		}
 	}
 
 	if footerY >= content.Y && footerY+1 < content.Y+content.Height {
-		drawSettingsFooter(screen, content, footerY)
+		drawSettingsFooter(screen, content, footerY, styles)
 	}
 	screen.Show()
 }
 
-func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides settingsOverrides, flags flagValues) (committed bool, interrupted bool) {
+func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides settingsOverrides, flags flagValues, styles ...Styles) (committed bool, interrupted bool) {
+	activeStyles := DefaultStyles
+	if len(styles) > 0 {
+		activeStyles = styles[0]
+	}
 	draft := *saved
 	dirty := make(map[int]bool)
 	selected := 0
@@ -703,7 +708,7 @@ func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides setting
 	message := ""
 
 	for {
-		drawSettings(screen, selected, draft, overrides, flags, message)
+		drawSettings(screen, selected, draft, overrides, flags, message, activeStyles)
 		event := screen.PollEvent()
 		switch event := event.(type) {
 		case *tcell.EventResize:

@@ -417,7 +417,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 
 			if ev.Key() == tcell.KeyCtrlP {
 				opened := t.now()
-				committed, interrupted := showSettings(t.Scr, &t.savedSettings, t.overrides, t.flagValues)
+				committed, interrupted := showSettings(t.Scr, &t.savedSettings, t.overrides, t.flagValues, t.styles)
 				if !startTime.IsZero() {
 					startTime = startTime.Add(t.now().Sub(opened))
 				}

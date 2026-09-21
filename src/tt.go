@@ -91,7 +91,7 @@ func exit(rc int) {
 	os.Exit(rc)
 }
 
-func showReport(scr tcell.Screen, cpm, wpm int, accuracy float64, attribution string, mistakes []mistake) {
+func showReport(scr tcell.Screen, cpm, wpm int, accuracy float64, attribution string, mistakes []mistake, activeStyles ...Styles) {
 	type reportRow struct {
 		label string
 		value string
@@ -99,6 +99,9 @@ func showReport(scr tcell.Screen, cpm, wpm int, accuracy float64, attribution st
 	}
 
 	styles := DefaultStyles
+	if len(activeStyles) > 0 {
+		styles = activeStyles[0]
+	}
 	rows := []reportRow{
 		{label: "WPM", value: fmt.Sprintf("%d", wpm), style: styles.Value},
 		{label: "CPM", value: fmt.Sprintf("%d", cpm), style: styles.Value},
@@ -124,90 +127,103 @@ func showReport(scr tcell.Screen, cpm, wpm int, accuracy float64, attribution st
 		})
 	}
 
-	scr.SetStyle(styles.Text)
-	scr.Clear()
-	sw, sh := scr.Size()
-	if sw <= 0 || sh <= 0 {
+	render := func() bool {
+		scr.SetStyle(styles.Text)
+		scr.Clear()
+		sw, sh := scr.Size()
+		if sw <= 0 || sh <= 0 {
+			scr.HideCursor()
+			scr.Show()
+			return false
+		}
+
+		title := "Typing complete"
+		labelWidth := CellWidth("Accuracy")
+		contentWidth := CellWidth(title)
+		for _, row := range rows {
+			if width := CellWidth(row.value); width > contentWidth {
+				contentWidth = width
+			}
+		}
+		contentWidth += labelWidth + 3
+
+		panelWidth := contentWidth + 2
+		if panelWidth > sw {
+			panelWidth = sw
+		}
+		panelHeight := len(rows) + 4
+		if panelHeight > sh {
+			panelHeight = sh
+		}
+		panelX := (sw - panelWidth) / 2
+		panelY := (sh - panelHeight) / 2
+
+		if panelWidth >= 2 && panelHeight >= 2 {
+			DrawBox(scr, Rect{X: panelX, Y: panelY, Width: panelWidth, Height: panelHeight},
+				RoundedBorder(), styles.Border)
+		}
+
+		contentX := panelX + 1
+		contentWidth = panelWidth - 2
+		if panelWidth < 2 {
+			contentX = panelX
+			contentWidth = panelWidth
+		}
+		if contentWidth > 0 {
+			DrawTextInRect(scr, Rect{X: contentX, Y: panelY + 1, Width: contentWidth, Height: 1},
+				TruncateCells(title, contentWidth), styles.AppTitle)
+		}
+
+		if contentWidth > 0 {
+			rowLabelWidth := labelWidth
+			if rowLabelWidth > contentWidth-1 {
+				rowLabelWidth = contentWidth - 1
+			}
+			if rowLabelWidth < 0 {
+				rowLabelWidth = 0
+			}
+			valueWidth := contentWidth - rowLabelWidth - 1
+			rowsBottom := panelY + panelHeight - 2
+			for i, row := range rows {
+				rowY := panelY + 2 + i
+				if rowY >= rowsBottom || valueWidth <= 0 {
+					break
+				}
+
+				DrawTextInRect(scr, Rect{X: contentX, Y: rowY, Width: rowLabelWidth, Height: 1},
+					TruncateCells(row.label, rowLabelWidth), styles.Muted)
+				value := TruncateCells(row.value, valueWidth)
+				valueX := contentX + contentWidth - CellWidth(value)
+				DrawTextInRect(scr, Rect{X: valueX, Y: rowY, Width: valueWidth, Height: 1},
+					value, row.style)
+			}
+		}
+
+		if panelHeight >= 4 && contentWidth > 0 {
+			footerY := panelY + panelHeight - 2
+			DrawTextInRect(scr, Rect{X: contentX, Y: footerY, Width: contentWidth, Height: 1},
+				TruncateCells("Esc close", contentWidth), styles.FooterText)
+		}
+
 		scr.HideCursor()
 		scr.Show()
+		return true
+	}
+
+	if !render() {
 		return
 	}
-
-	title := "Typing complete"
-	labelWidth := CellWidth("Accuracy")
-	contentWidth := CellWidth(title)
-	for _, row := range rows {
-		if width := CellWidth(row.value); width > contentWidth {
-			contentWidth = width
-		}
-	}
-	contentWidth += labelWidth + 3
-
-	panelWidth := contentWidth + 2
-	if panelWidth > sw {
-		panelWidth = sw
-	}
-	panelHeight := len(rows) + 4
-	if panelHeight > sh {
-		panelHeight = sh
-	}
-	panelX := (sw - panelWidth) / 2
-	panelY := (sh - panelHeight) / 2
-
-	if panelWidth >= 2 && panelHeight >= 2 {
-		DrawBox(scr, Rect{X: panelX, Y: panelY, Width: panelWidth, Height: panelHeight},
-			RoundedBorder(), styles.Border)
-	}
-
-	contentX := panelX + 1
-	contentWidth = panelWidth - 2
-	if panelWidth < 2 {
-		contentX = panelX
-		contentWidth = panelWidth
-	}
-	if contentWidth > 0 {
-		DrawTextInRect(scr, Rect{X: contentX, Y: panelY + 1, Width: contentWidth, Height: 1},
-			TruncateCells(title, contentWidth), styles.AppTitle)
-	}
-
-	if contentWidth > 0 {
-		if labelWidth > contentWidth-1 {
-			labelWidth = contentWidth - 1
-		}
-		if labelWidth < 0 {
-			labelWidth = 0
-		}
-		valueWidth := contentWidth - labelWidth - 1
-		rowsBottom := panelY + panelHeight - 2
-		for i, row := range rows {
-			rowY := panelY + 2 + i
-			if rowY >= rowsBottom || valueWidth <= 0 {
-				break
-			}
-
-			DrawTextInRect(scr, Rect{X: contentX, Y: rowY, Width: labelWidth, Height: 1},
-				TruncateCells(row.label, labelWidth), styles.Muted)
-			value := TruncateCells(row.value, valueWidth)
-			valueX := contentX + contentWidth - CellWidth(value)
-			DrawTextInRect(scr, Rect{X: valueX, Y: rowY, Width: valueWidth, Height: 1},
-				value, row.style)
-		}
-	}
-
-	if panelHeight >= 4 && contentWidth > 0 {
-		footerY := panelY + panelHeight - 2
-		DrawTextInRect(scr, Rect{X: contentX, Y: footerY, Width: contentWidth, Height: 1},
-			TruncateCells("Esc close", contentWidth), styles.FooterText)
-	}
-
-	scr.HideCursor()
-	scr.Show()
-
 	for {
-		if key, ok := scr.PollEvent().(*tcell.EventKey); ok && key.Key() == tcell.KeyEscape {
-			return
-		} else if ok && key.Key() == tcell.KeyCtrlC {
-			exit(1)
+		switch event := scr.PollEvent().(type) {
+		case *tcell.EventResize:
+			render()
+		case *tcell.EventKey:
+			if event.Key() == tcell.KeyEscape {
+				return
+			}
+			if event.Key() == tcell.KeyCtrlC {
+				exit(1)
+			}
 		}
 	}
 }
@@ -628,7 +644,7 @@ func main() {
 				if len(tests[idx]) == 1 {
 					attribution = tests[idx][0].Attribution
 				}
-				showReport(scr, cpm, wpm, accuracy, attribution, mistakes)
+				showReport(scr, cpm, wpm, accuracy, attribution, mistakes, typer.styles)
 			}
 			if oneShotMode {
 				exit(0)
