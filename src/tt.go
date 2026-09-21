@@ -378,6 +378,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	visitedFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		visitedFlags[f.Name] = true
+	})
+	overrides := collectSettingsOverrides(visitedFlags)
+
+	highlight := highlightCurrentAndNext
+	if noHighlight {
+		highlight = highlightOff
+	}
+	if noHighlightNext {
+		highlight = highlightCurrentOnly
+	}
+	if noHighlightCurrent {
+		highlight = highlightNextOnly
+	}
+	liveFlags := flagValues{
+		ShowWPM:        showWpm,
+		SkipWord:       !noSkip,
+		AllowBackspace: !noBackspace,
+		BlockCursor:    normalCursor,
+		BoldTypedText:  boldFlag,
+		Highlight:      highlight,
+	}
+
+	savedSettings := loadRuntimeSettings(RUNTIME_SETTINGS_DB, os.Stderr)
+
 	if noTheme {
 		os.Setenv("TCELL_TRUECOLOR", "disable")
 	}
@@ -438,19 +465,10 @@ func main() {
 		typer = createTyper(scr, boldFlag, themeName)
 	}
 
-	if noHighlightNext || noHighlight {
-		typer.currentWordStyle = typer.nextWordStyle
-		typer.nextWordStyle = typer.defaultStyle
-	}
-
-	if noHighlightCurrent || noHighlight {
-		typer.currentWordStyle = typer.defaultStyle
-	}
-
-	typer.SkipWord = !noSkip
-	typer.DisableBackspace = noBackspace
-	typer.BlockCursor = normalCursor
-	typer.ShowWpm = showWpm
+	typer.savedSettings = savedSettings
+	typer.overrides = overrides
+	typer.flagValues = liveFlags
+	typer.applyRuntimeSettings()
 
 	if soundFile != "" || errorSoundFile != "" {
 		const targetRate = beep.SampleRate(44100)

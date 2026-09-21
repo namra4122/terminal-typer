@@ -9,6 +9,7 @@ import (
 
 var FILE_STATE_DB string
 var MISTAKE_DB string
+var RUNTIME_SETTINGS_DB string
 
 func init() {
 	var ok bool
@@ -29,6 +30,7 @@ func init() {
 
 	FILE_STATE_DB = filepath.Join(data, ".db")
 	MISTAKE_DB = filepath.Join(data, ".errors")
+	RUNTIME_SETTINGS_DB = filepath.Join(data, "settings.json")
 }
 
 func readValue(path string, o interface{}) error {

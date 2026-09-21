@@ -61,6 +61,9 @@ options.
 - `C-c` exits the test.
 - `right` moves to the next test.
 - `left` moves to the previous test.
+- `C-p` opens Settings during an active test. Use `up`/`down` to select a
+  setting, `space` or `enter` to change it, and `escape` or `C-p` to save and
+  return to the same test. The test timer is paused while Settings is open.
 
 ## Examples
 
@@ -88,3 +91,11 @@ Custom themes and word lists can be defined in `~/.tt/themes` and `~/.tt/words`
 and used in conjunction with the `-theme` and `-words` flags. A list of
 preloaded themes and word lists can be found in `words/` and `themes/` and are
 accessible by default using the respective flags.
+
+Live typing controls changed through Settings are saved in
+`$XDG_DATA_HOME/tt/settings.json`, or
+`~/.local/share/tt/settings.json` when `XDG_DATA_HOME` is unset. Saved controls
+apply to future runs. An explicitly supplied `-showwpm`, `-noskip`,
+`-nobackspace`, `-blockcursor`, `-bold`, `-nohighlight`, `-highlight1`, or
+`-highlight2` flag overrides the matching saved control for that invocation
+without changing the saved value.

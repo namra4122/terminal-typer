@@ -200,10 +200,21 @@ Modify to taste.
   /etc/tt/words\
   /etc/tt/themes
 
+  Live typing controls changed through Settings are saved in
+  **$XDG_DATA_HOME/tt/settings.json**, or
+  **~/.local/share/tt/settings.json** when **$XDG_DATA_HOME** is unset.
+  Explicitly supplied **-showwpm**, **-noskip**, **-nobackspace**,
+  **-blockcursor**, **-bold**, **-nohighlight**, **-highlight1**, and
+  **-highlight2** flags override matching saved values for the current
+  invocation without rewriting them.
+
 # KEYS
 
   **esc: ** Restarts the test\
   **C-c: ** Terminates tt\
+  **C-p: ** Opens Settings during an active test and pauses its timer. In
+  Settings, **up**/**down** select a row, **space** or **enter** changes it, and
+  **esc** or **C-p** saves and returns to the same test.\
   **C-backspace: ** Deletes the previous word\
   **right** Move to the next test.\
   **left** Move to the previous test.

@@ -41,6 +41,7 @@ type typer struct {
 	DisableBackspace bool
 	BlockCursor      bool
 	tty              io.Writer
+	now              func() time.Time
 
 	currentWordStyle    tcell.Style
 	nextWordStyle       tcell.Style
@@ -48,6 +49,14 @@ type typer struct {
 	incorrectStyle      tcell.Style
 	correctStyle        tcell.Style
 	defaultStyle        tcell.Style
+	baseCorrectStyle    tcell.Style
+	baseCurrentStyle    tcell.Style
+	baseNextStyle       tcell.Style
+
+	savedSettings runtimeSettings
+	settings      runtimeSettings
+	overrides     settingsOverrides
+	flagValues    flagValues
 
 	soundBuffer      *beep.Buffer
 	errorSoundBuffer *beep.Buffer
@@ -74,6 +83,7 @@ func NewTyper(scr tcell.Screen, emboldenTypedText bool, fgcol, bgcol, hicol, hic
 		Scr:      scr,
 		SkipWord: true,
 		tty:      tty,
+		now:      time.Now,
 
 		defaultStyle:        def,
 		correctStyle:        correctStyle,
@@ -81,6 +91,39 @@ func NewTyper(scr tcell.Screen, emboldenTypedText bool, fgcol, bgcol, hicol, hic
 		nextWordStyle:       def.Foreground(hicol3),
 		incorrectStyle:      def.Foreground(errcol),
 		incorrectSpaceStyle: def.Background(errcol),
+		baseCorrectStyle:    def.Foreground(hicol),
+		baseCurrentStyle:    def.Foreground(hicol2),
+		baseNextStyle:       def.Foreground(hicol3),
+	}
+}
+
+func (t *typer) applyRuntimeSettings() {
+	t.settings = effectiveRuntimeSettings(t.savedSettings, t.overrides, t.flagValues)
+	t.SkipWord = t.settings.SkipWord
+	t.ShowWpm = t.settings.ShowWPM
+	t.DisableBackspace = !t.settings.AllowBackspace
+	t.BlockCursor = t.settings.BlockCursor
+	t.correctStyle = t.baseCorrectStyle.Bold(t.settings.BoldTypedText)
+
+	switch t.settings.Highlight {
+	case highlightCurrentOnly:
+		t.currentWordStyle = t.baseNextStyle
+		t.nextWordStyle = t.defaultStyle
+	case highlightNextOnly:
+		t.currentWordStyle = t.defaultStyle
+		t.nextWordStyle = t.baseNextStyle
+	case highlightOff:
+		t.currentWordStyle = t.defaultStyle
+		t.nextWordStyle = t.defaultStyle
+	default:
+		t.currentWordStyle = t.baseCurrentStyle
+		t.nextWordStyle = t.baseNextStyle
+	}
+
+	if t.BlockCursor {
+		t.tty.Write([]byte("\033[2 q"))
+	} else {
+		t.tty.Write([]byte("\033[5 q"))
 	}
 }
 
@@ -177,18 +220,12 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 	text := []rune(s)
 	typed := make([]rune, len(text))
 
-	sw, sh := scr.Size()
+	sw, sh := t.Scr.Size()
 	nc, nr := calcStringDimensions(s)
 	x := (sw - nc) / 2
 	y := (sh - nr) / 2
 
-	if !t.BlockCursor {
-		t.tty.Write([]byte("\033[5 q"))
-
-		//Assumes original cursor shape was a block (the one true cursor shape), there doesn't appear to be a
-		//good way to save/restore the shape if the user has changed it from the otcs.
-		defer t.tty.Write([]byte("\033[2 q"))
-	}
+	defer t.tty.Write([]byte("\033[2 q"))
 
 	t.Scr.SetStyle(t.defaultStyle)
 	idx := 0
@@ -210,7 +247,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 		}
 
 		rc = TyperComplete
-		duration = time.Now().Sub(startTime)
+		duration = t.now().Sub(startTime)
 	}
 
 	redraw := func() {
@@ -231,7 +268,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 			}
 
 			if i == idx {
-				scr.ShowCursor(cx, cy)
+				t.Scr.ShowCursor(cx, cy)
 				inword = 0
 			}
 
@@ -255,7 +292,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 				style = t.correctStyle
 			}
 
-			scr.SetContent(cx, cy, text[i], nil, style)
+			t.Scr.SetContent(cx, cy, text[i], nil, style)
 			cx++
 		}
 
@@ -263,7 +300,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 		drawString(t.Scr, x+nc-aw, y+nr+1, attribution, -1, t.defaultStyle)
 
 		if timeLimit != -1 && !startTime.IsZero() {
-			remaining := timeLimit - time.Now().Sub(startTime)
+			remaining := timeLimit - t.now().Sub(startTime)
 			drawString(t.Scr, x+nc/2, y+nr+ah+1, "      ", -1, t.defaultStyle)
 			drawString(t.Scr, x+nc/2, y+nr+ah+1, strconv.Itoa(int(remaining/1e9)+1), -1, t.defaultStyle)
 		}
@@ -322,7 +359,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 	defer close(tickerCloser)
 
 	if startImmediately {
-		startTime = time.Now()
+		startTime = t.now()
 	}
 
 	t.Scr.Clear()
@@ -343,8 +380,25 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 				continue
 			}
 
+			if ev.Key() == tcell.KeyCtrlP {
+				opened := t.now()
+				committed, interrupted := showSettings(t.Scr, &t.savedSettings, t.overrides, t.flagValues)
+				if !startTime.IsZero() {
+					startTime = startTime.Add(t.now().Sub(opened))
+				}
+				if interrupted {
+					rc = TyperSigInt
+					return
+				}
+				if committed {
+					t.applyRuntimeSettings()
+				}
+				t.Scr.Clear()
+				continue
+			}
+
 			if startTime.IsZero() {
-				startTime = time.Now()
+				startTime = t.now()
 			}
 
 			switch key := ev.Key(); key {
@@ -424,7 +478,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 				}
 			}
 		default: //tick
-			if timeLimit != -1 && !startTime.IsZero() && timeLimit <= time.Now().Sub(startTime) {
+			if timeLimit != -1 && !startTime.IsZero() && timeLimit <= t.now().Sub(startTime) {
 				calcStats()
 				return
 			}
