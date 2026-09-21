@@ -402,55 +402,172 @@ func mergeDirtySettings(base, draft runtimeSettings, dirty map[int]bool) runtime
 	return base
 }
 
+const (
+	// settingsMinimumWidth and settingsMinimumHeight retain the modal's
+	// established input gate. Below this size the modal remains read-only so
+	// users cannot accidentally edit settings while the panel is unreadable.
+	settingsMinimumWidth  = 52
+	settingsMinimumHeight = 14
+	settingsPanelMaxWidth = 72
+	settingsPanelMaxHeight = 16
+)
+
+func settingsPanelRect(screenWidth, screenHeight int) (Rect, bool) {
+	if screenWidth < settingsMinimumWidth || screenHeight < settingsMinimumHeight {
+		return Rect{}, false
+	}
+
+	width := screenWidth
+	if width > settingsPanelMaxWidth {
+		width = settingsPanelMaxWidth
+	}
+	height := screenHeight
+	if height > settingsPanelMaxHeight {
+		height = settingsPanelMaxHeight
+	}
+	return Rect{
+		X:      (screenWidth - width) / 2,
+		Y:      (screenHeight - height) / 2,
+		Width:  width,
+		Height: height,
+	}, true
+}
+
+func drawSettingsFallback(screen tcell.Screen) {
+	screenWidth, screenHeight := screen.Size()
+	message := TruncateCells("Terminal too small for settings (need 52x14)", screenWidth)
+	x := (screenWidth - CellWidth(message)) / 2
+	if x < 0 {
+		x = 0
+	}
+	y := screenHeight / 2
+	DrawText(screen, x, y, message, DefaultStyles.Warning)
+}
+
+func drawSettingsRow(screen tcell.Screen, content Rect, row, selected int, active runtimeSettings, overrides settingsOverrides) {
+	if row < 0 || row >= len(settingsRows) || content.Width <= 0 || content.Height <= 0 {
+		return
+	}
+
+	setting := settingsRows[row]
+	marker := "  "
+	if row == selected {
+		marker = "> "
+	}
+	label := marker + setting.Label
+	labelWidth := CellWidth(label)
+	valueWidth := content.Width - labelWidth - 1
+	if valueWidth < 1 {
+		valueWidth = 1
+		labelWidth = content.Width - 2
+		if labelWidth < 1 {
+			labelWidth = 1
+		}
+		label = TruncateCells(label, labelWidth)
+	}
+
+	value := settingValue(active, row)
+	if settingIsOverridden(row, overrides) && valueWidth >= CellWidth(value)+2 {
+		value += " *"
+	}
+	value = AlignRightCells(value, valueWidth)
+
+	DrawTextInRect(screen, Rect{
+		X:      content.X,
+		Y:      content.Y + row,
+		Width:  labelWidth,
+		Height: 1,
+	}, label, DefaultStyles.Text)
+	DrawTextInRect(screen, Rect{
+		X:      content.X + labelWidth + 1,
+		Y:      content.Y + row,
+		Width:  valueWidth,
+		Height: 1,
+	}, value, DefaultStyles.Value)
+}
+
 func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, overrides settingsOverrides, flags flagValues, message string) {
-	const width, height = 52, 14
 	screen.Clear()
 	screen.HideCursor()
-	screen.SetStyle(tcell.StyleDefault)
+	screen.SetStyle(DefaultStyles.Text)
 
 	screenWidth, screenHeight := screen.Size()
-	if screenWidth < width || screenHeight < height {
-		drawStringAtCenter(screen, "Terminal too small for settings (need 52x14)", tcell.StyleDefault)
+	panel, ok := settingsPanelRect(screenWidth, screenHeight)
+	if !ok {
+		drawSettingsFallback(screen)
 		screen.Show()
 		return
 	}
 
-	x := (screenWidth - width) / 2
-	y := (screenHeight - height) / 2
-	for column := 0; column < width; column++ {
-		screen.SetContent(x+column, y, '-', nil, tcell.StyleDefault)
-		screen.SetContent(x+column, y+height-1, '-', nil, tcell.StyleDefault)
-	}
-	for line := 1; line < height-1; line++ {
-		screen.SetContent(x, y+line, '|', nil, tcell.StyleDefault)
-		screen.SetContent(x+width-1, y+line, '|', nil, tcell.StyleDefault)
-	}
-	drawString(screen, x+(width-len("Settings"))/2, y+1, "Settings", -1, tcell.StyleDefault.Bold(true))
-	active := effectiveRuntimeSettings(draft, overrides, flags)
-	for row, setting := range settingsRows {
-		marker := " "
-		if row == selected {
-			marker = ">"
-		}
-		line := fmt.Sprintf("%s %s: %s", marker, setting.Label, settingValue(active, row))
-		if settingIsOverridden(row, overrides) {
-			line += "  CLI override"
-			if row == selected {
-				savedValue := "Saved: " + settingValue(draft, row)
-				drawString(screen, x+(width-len(savedValue))/2, y+2, savedValue, -1, tcell.StyleDefault)
-			}
-		}
-		drawString(screen, x+2, y+3+row, line, -1, tcell.StyleDefault)
+	DrawBox(screen, panel, NormalBorder(), DefaultStyles.Border)
+	inner := panel.Inset(1)
+	if inner.Width <= 0 || inner.Height <= 0 {
+		screen.Show()
+		return
 	}
 
-	drawString(screen, x+5, y+10, "Up/Down select · Space/Enter change", -1, tcell.StyleDefault)
-	drawString(screen, x+13, y+11, "Esc/Ctrl-P save & close", -1, tcell.StyleDefault)
-	if message != "" {
-		runes := []rune("Error: " + message)
-		if len(runes) > width-4 {
-			runes = runes[:width-4]
+	// Keep a single cell of horizontal breathing room when possible. Vertical
+	// padding is deliberately compact so all settings remain available before
+	// optional help is removed on short terminals.
+	paddingX := 2
+	if inner.Width < 40 {
+		paddingX = 1
+	}
+	content := Rect{
+		X:      inner.X + paddingX,
+		Y:      inner.Y + 1,
+		Width:  inner.Width - paddingX*2,
+		Height: inner.Height - 2,
+	}
+	if content.Width <= 0 || content.Height <= 0 {
+		screen.Show()
+		return
+	}
+
+	DrawTextInRect(screen, Rect{X: content.X, Y: content.Y, Width: content.Width, Height: 1},
+		"Settings", DefaultStyles.AppTitle)
+
+	active := effectiveRuntimeSettings(draft, overrides, flags)
+	rowsY := content.Y + 1
+	rowsHeight := content.Height - 1
+	if rowsHeight > settingsRowCount {
+		rowsHeight = settingsRowCount
+	}
+	for row := 0; row < rowsHeight; row++ {
+		drawSettingsRow(screen, Rect{
+			X:      content.X,
+			Y:      rowsY,
+			Width:  content.Width,
+			Height: rowsHeight,
+		}, row, selected, active, overrides)
+	}
+
+	nextY := rowsY + rowsHeight
+	remaining := content.Y + content.Height - nextY
+	if message != "" && remaining > 0 {
+		DrawTextInRect(screen, Rect{
+			X:      content.X,
+			Y:      nextY,
+			Width:  content.Width,
+			Height: 1,
+		}, "Error: "+message, DefaultStyles.Error)
+		nextY++
+		remaining--
+	}
+
+	help := []string{"↑↓ Select · Space/Enter Change", "Esc/Ctrl-P Save & Close"}
+	for _, line := range help {
+		if remaining <= 0 {
+			break
 		}
-		drawString(screen, x+2, y+12, string(runes), -1, tcell.StyleDefault)
+		DrawTextInRect(screen, Rect{
+			X:      content.X,
+			Y:      nextY,
+			Width:  content.Width,
+			Height: 1,
+		}, line, DefaultStyles.FooterText)
+		nextY++
+		remaining--
 	}
 	screen.Show()
 }
@@ -494,7 +611,7 @@ func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides setting
 			}
 
 			screenWidth, screenHeight := screen.Size()
-			if screenWidth < 52 || screenHeight < 14 {
+			if screenWidth < settingsMinimumWidth || screenHeight < settingsMinimumHeight {
 				continue
 			}
 			switch event.Key() {
