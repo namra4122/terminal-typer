@@ -1,6 +1,6 @@
 # Runtime settings window
 
-- **Lifecycle:** approved implementation plan; retain as the compatibility record for the persistent runtime settings feature.
+- **Lifecycle:** implemented compatibility record. The six-row Settings modal and saved controls exist in `src/settings.go` and `src/typer.go`; inspect current source for exact behavior.
 - **User outcome:** a typist can save live typing controls for future `tt` sessions without restarting, while every documented CLI flag keeps its existing syntax and overrides the saved value only for the invocation that supplied it.
 
 ## Overview

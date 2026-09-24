@@ -1,4 +1,6 @@
-# TUI Visual Redesign Spec
+# TUI visual redesign reference
+
+Status: historical design draft, partially implemented. This document describes visual goals and includes illustrative Bubble Tea and Lip Gloss code. The current application uses `tcell`, with `src/layout.go` and `src/theme.go` providing shared drawing primitives. Its examples and implementation checklist do not describe the current implementation and do not require a framework migration. Use [the Phase 3 roadmap](006-tui-experience.md) for proposed future work and inspect source before making changes.
 
 ## Goal
 
@@ -21,9 +23,9 @@ The final result should feel like a cohesive application, not a collection of in
 
 # 1. Tech stack
 
-Use the Charm ecosystem if the project is not already using an equivalent TUI framework.
+Current stack: Go 1.17 and `tcell`, as declared in `go.mod` and used by `src/tt.go`, `src/layout.go`, and `src/theme.go`. The following Charm packages were proposed when this draft was written; they are illustrative alternatives, not dependencies or a migration decision.
 
-Preferred:
+Historical examples:
 
 ```go
 github.com/charmbracelet/bubbletea

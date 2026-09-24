@@ -1,101 +1,83 @@
-# What
+# Terminal Typer (`tt`)
 
-A terminal based typing test.
+`tt` is a local, keyboard-driven typing test for the terminal. The current source checkout runs on Go and `tcell`. It supports generated words, quotes, files, and piped text, with themes, optional sounds, saved live controls, and basic results. It does not require an account or send test data over the network.
 
-![](demo.gif)
+![Terminal Typer demonstration](demo.gif)
 
-# Installation
+The demonstration is illustrative; the current source and manual define behavior.
 
-## Linux
+## Current checkout and roadmap
 
-```
-sudo curl -L https://github.com/lemnos/tt/releases/download/v0.4.2/tt-linux -o /usr/local/bin/tt && sudo chmod +x /usr/local/bin/tt
-sudo curl -o /usr/share/man/man1/tt.1.gz -L https://github.com/lemnos/tt/releases/download/v0.4.2/tt.1.gz
-```
+The executable still reports version `0.4.2`. The source checkout also contains work beyond the historical `0.4.2` release notes, including the `Ctrl-P` Settings modal and shared `tcell` layout and theme helpers. The prebuilt release commands below refer to the `v0.4.2` artifacts; build from source to use the current checkout.
 
-## OSX
+| Available in this checkout | Proposed in the [five-phase roadmap](.agents/plans/README.md) |
+| --- | --- |
+| English 1000-word default, other bundled word lists, quotes, custom words, files, and stdin | Hinglish and programming-language content packs; explicit time, word, custom, and practice modes |
+| Optional timer, live WPM, word skipping, backspace controls, themes, and key/error sounds | Raw WPM and other live widgets; focus and tape modes; command palette; more theme and sound controls |
+| Final WPM, CPM, accuracy, mistakes, JSON/CSV output, and locally saved mistakes | Persistent result history, detailed graphs, personal bests, adaptive practice, keyboard layouts, presets, and Funbox |
 
-```
-mkdir -p /usr/local/bin /usr/local/share/man/man1 # Usually created by brew
+The [plan index](.agents/plans/README.md) labels implemented records, design references, and proposed work. A feature listed only in a plan is not available in the executable.
 
-sudo curl -L https://github.com/lemnos/tt/releases/download/v0.4.2/tt-osx -o /usr/local/bin/tt && sudo chmod +x /usr/local/bin/tt
-sudo curl -o /usr/local/share/man/man1/tt.1.gz -L https://github.com/lemnos/tt/releases/download/v0.4.2/tt.1.gz
-```
+## Build from source
 
-## Uninstall
+Go 1.17 or newer is required. From this checkout:
 
-```
-sudo rm /usr/local/bin/tt /usr/share/man/man1/tt.1.gz
-```
-
-## From source
-
-Requires Go 1.17 or newer. To install the optional manual page, `make install`
-also requires Pandoc and gzip.
-
-```
-git clone https://github.com/lemnos/tt
-cd tt
+```sh
 go mod download
 make build
 ./bin/tt
 ```
 
-Run `make install` to install the binary and generated `tt(1)` manual under
-`/usr/local` (override with `PREFIX` or `DESTDIR`). Contributors should run
-`make verify` and `make smoke`; see [CONTRIBUTING.md](CONTRIBUTING.md).
+`make install` installs the binary and manual under `/usr/local`; override `PREFIX` or `DESTDIR` as needed. Installing the manual requires Pandoc and gzip. Contributors should run `make verify` and `make smoke`; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Best served on a terminal with truecolor and cursor shape support (e.g kitty, iterm)
+## Prebuilt 0.4.2 release
 
-# Usage
+These commands fetch the historical `v0.4.2` release, whose behavior may differ from this source checkout.
 
-By default 50 words from the top 1000 words in the English language are used to
-constitute the test. Custom text can be supplied by piping arbitrary text to the
-program. Each paragraph in the input is shown as a separate segment of the text.
-See `man tt` or `man.md` for a complete description and a comprehensive set of
-options.
+### Linux
 
-## Keys
+```sh
+sudo curl -L https://github.com/lemnos/tt/releases/download/v0.4.2/tt-linux -o /usr/local/bin/tt && sudo chmod +x /usr/local/bin/tt
+sudo curl -o /usr/share/man/man1/tt.1.gz -L https://github.com/lemnos/tt/releases/download/v0.4.2/tt.1.gz
+```
 
-- Pressing `escape` at any point restarts the test.
-- `C-c` exits the test.
-- `right` moves to the next test.
-- `left` moves to the previous test.
-- `C-p` opens Settings during an active test. Use `up`/`down` to select a
-  setting, `space` or `enter` to change it, and `escape` or `C-p` to save and
-  return to the same test. The test timer is paused while Settings is open.
+### macOS
 
-## Examples
+```sh
+mkdir -p /usr/local/bin /usr/local/share/man/man1
+sudo curl -L https://github.com/lemnos/tt/releases/download/v0.4.2/tt-osx -o /usr/local/bin/tt && sudo chmod +x /usr/local/bin/tt
+sudo curl -o /usr/local/share/man/man1/tt.1.gz -L https://github.com/lemnos/tt/releases/download/v0.4.2/tt.1.gz
+```
 
- - `tt -quotes en` Starts quote mode with the builtin quote list 'en'.
- - `tt -n 10 -g 5` produces a test consisting of 50 randomly drawn words in 5 groups of 10 words each.
- - `tt -t 10` starts a timed test lasting 10 seconds.
- - `tt -theme gruvbox` Starts tt with the gruvbox theme.
+To remove those installations, delete the installed `tt` binary and `tt.1.gz` manual from their respective directories.
 
-`tt` is designed to be easily scriptable and integrate nicely with
-other *nix tools. With a little shell scripting most features the user can
-conceive of should be possible to implement. Below are some simple examples of
-what can be achieved.
+## Use the current checkout
 
- - `shuf -n 40 /usr/share/dict/words|tt`  Produces a test consisting of 40 random words drawn from your system's dictionary.
- - `curl http://api.quotable.io/random|jq '[.text=.content|.attribution=.author]'|tt -quotes -` Produces a test consisting of a random quote.
- - `alias ttd='tt -csv >> ~/wpm.csv'` Creates an alias called ttd which keeps a log of progress in your home directory`.
+Running `tt` starts a test using 50 randomly selected words from the bundled `1000en` list. `-n` changes words per group and `-g` changes the number of groups. Adjacent duplicate words are avoided within each generated group. `-t` limits a test to a number of seconds; it does not provide named duration presets yet.
 
-The default behaviour is equivalent to `tt -n 50`.
+```sh
+./bin/tt -n 10 -g 5
+./bin/tt -t 30
+./bin/tt -quotes en
+./bin/tt -theme gruvbox
+./bin/tt path/to/file.txt
+cat path/to/text.txt | ./bin/tt
+```
 
-See `-help` for an exhaustive list of options.
+`-words` selects a bundled or local word list. `-quotes` selects a bundled or local JSON quote file. A positional file is split into paragraph-based tests; `-start` selects the starting paragraph and `-start 0` resets its saved position. Piped stdin is accepted as custom text. `-multi` treats each input paragraph as a separate test; `-raw` preserves the input's line breaks instead of reflowing text. See [man.md](man.md) or `tt -help` for every flag.
 
-## Configuration
+### Keys and Settings
 
-Custom themes and word lists can be defined in `~/.tt/themes` and `~/.tt/words`
-and used in conjunction with the `-theme` and `-words` flags. A list of
-preloaded themes and word lists can be found in `words/` and `themes/` and are
-accessible by default using the respective flags.
+- `Escape` restarts the current test.
+- `Left` and `Right` move between tests.
+- `Ctrl-C` exits; `Ctrl-L` refreshes the terminal.
+- `Ctrl-P` opens Settings during an active test and pauses its timer. `Up` and `Down` select a row, `Space` or `Enter` changes it, and `Escape` or `Ctrl-P` saves and returns to the same test.
+- Backspace corrects input; `Ctrl-W`, `Ctrl-Backspace`, or `Alt-Backspace` deletes a word where the terminal reports those keys.
 
-Live typing controls changed through Settings are saved in
-`$XDG_DATA_HOME/tt/settings.json`, or
-`~/.local/share/tt/settings.json` when `XDG_DATA_HOME` is unset. Saved controls
-apply to future runs. An explicitly supplied `-showwpm`, `-noskip`,
-`-nobackspace`, `-blockcursor`, `-bold`, `-nohighlight`, `-highlight1`, or
-`-highlight2` flag overrides the matching saved control for that invocation
-without changing the saved value.
+Settings currently contains Show WPM, Skip word on Space, Allow Backspace, Cursor style, Typed text weight, and Word highlighting. Saved values go to `$XDG_DATA_HOME/tt/settings.json`, or `~/.local/share/tt/settings.json` if `XDG_DATA_HOME` is unset. Explicit `-showwpm`, `-noskip`, `-nobackspace`, `-blockcursor`, `-bold`, `-nohighlight`, `-highlight1`, and `-highlight2` flags override the matching saved control for that invocation without rewriting it.
+
+### Results and local resources
+
+The completed-test report shows WPM, CPM, accuracy, and mistakes, plus attribution for a single quote. `-json` and `-csv` print the basic result at process exit; `-noreport` hides the interactive report. Mistakes and file progress are stored locally under `$XDG_DATA_HOME/tt` or `~/.local/share/tt`. Detailed result history, raw WPM, consistency, burst, PBs, and graphs are roadmap items.
+
+Themes, word lists, quotes, and sounds can come from an explicit path, a matching directory under `~/.tt` or `/etc/tt`, or embedded resources, in that order. List embedded names with `tt -list themes`, `tt -list words`, `tt -list quotes`, or `tt -list sounds`. `-sound` and `-error-sound` accept WAV or MP3 resources. A terminal with truecolor and cursor-shape support shows the intended styling most faithfully.

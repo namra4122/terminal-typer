@@ -1,6 +1,6 @@
 # Terminal Typer roadmap
 
-This directory keeps numbered implementation records and planning outlines. Plans `001`-`003` cover maintenance, runtime settings, and the existing TUI redesign spec. Plans `004`-`008` capture the five-phase terminal-native typing roadmap from the [Monkeytype Web Research conversation](chatgpt-conversation://6ab4a90c-db1c-83ee-83cc-a715450953cc). They are ordered backlogs for writing smaller implementation specs, not authorization to change the CLI contract or release the product.
+This directory keeps numbered implementation records and planning outlines. Plan `001` records completed maintenance work, and plan `002` records the implemented runtime Settings modal. Plan `003` is an older, partially realized visual design draft with examples from another TUI stack; it is not an authoritative description of the current app. Plans `004`-`008` capture the proposed five-phase terminal-native typing roadmap from the [Monkeytype Web Research conversation](chatgpt-conversation://6ab4a90c-db1c-83ee-83cc-a715450953cc). Plan `009` records the documentation accuracy update. Roadmap plans are ordered backlogs for writing smaller implementation specs, not evidence of completed features or authorization to change the CLI contract.
 
 | Phase | Plan | User outcome |
 | --- | --- | --- |

@@ -1,26 +1,31 @@
-# 0.4.2:
-  Added -notheme, -blockcursor and -bold.
+# Released changes
 
-# 0.4.0:
-  Too numerous to list (see the man page)
+This file records historical releases. It does not list every change in the current source checkout. See [README.md](README.md) for current behavior and [the plan index](.agents/plans/README.md) for proposals.
 
-  Highlights:
-  
- - Added -quotes.
- - Added support for navigating between tests via right/left.
- - Now store the user's position within a file if one is specified.
- - Improved documentation.
+## 0.4.2
 
-# 0.3.0:
- - Added support for custom word lists (`-words).
- - `-theme` now accepts a path.
- - Added `~/.tt/themes` and `~/.tt/words`.
- - Scrapped ~/.ttrc in favour of aliases/flags.
- - Included more default word lists. (`-list words`)
+- Added `-notheme`, `-blockcursor`, and `-bold`.
 
-# 0.2.2:
- - Modified -g to correspond to the number of groups rather than the group size.
- - Added -multi
- - Added -v
- - Changed the default behaviour to restart the currently generated test rather than generating a new one
- - Added a CHANGELOG :P
+## 0.4.0
+
+Highlights from this release:
+
+- Added `-quotes`.
+- Added test navigation with Left and Right.
+- Stored the user's position within a supplied file.
+- Improved documentation.
+
+## 0.3.0
+
+- Added custom word lists with `-words`.
+- Allowed `-theme` to accept a path.
+- Added `~/.tt/themes` and `~/.tt/words`.
+- Removed `~/.ttrc` in favor of aliases and flags.
+- Included more default word lists, visible with `-list words`.
+
+## 0.2.2
+
+- Changed `-g` to select the number of groups rather than the group size.
+- Added `-multi` and `-v`.
+- Changed the default restart behavior to repeat the current generated test.
+- Added this changelog.

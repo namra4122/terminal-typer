@@ -10,6 +10,11 @@ usage: tt \[OPTION\]... \[FILE\]
 
 # DESCRIPTION
 
+  This manual describes the current source checkout. The executable still
+  reports version 0.4.2, but the source checkout includes changes beyond the
+  historical 0.4.2 release notes. The repository's five-phase roadmap
+  describes proposals, not installed features.
+
   By default tt creates a test consisting of 50 randomly generated words from
   the top 1000 words in the English language. If provided with a path, tt will
   use the given file as input treating each paragraph as a separate segment of
@@ -33,7 +38,7 @@ usage: tt \[OPTION\]... \[FILE\]
 
 : Starts quote mode in which quotes are randomly drawn from the given file. The file should be JSON encoded and have the following form:
 
-    [{"text": "foo", attribution: "bar"}]
+    [{"text": "foo", "attribution": "bar"}]
 
 ## Word Mode
 
@@ -66,13 +71,13 @@ usage: tt \[OPTION\]... \[FILE\]
 
 -blockcursor
 
-: Use the default cursor style.
+: Use a block cursor.
 
 -bold
 
 : Embolden typed text.
 
--w 
+-w *WIDTH*
 
 : The maximum line length in characters. This option is ignored if -raw is present.
 
@@ -86,6 +91,10 @@ usage: tt \[OPTION\]... \[FILE\]
 
 : Disable word skipping when space is pressed.
 
+-nobackspace
+
+: Disable backspace and word deletion.
+
 -nohighlight
 
 : Disable highlighting.
@@ -97,6 +106,16 @@ usage: tt \[OPTION\]... \[FILE\]
 -highlight2
 
 : Only highlight the next word.
+
+## Sound
+
+-sound *SOUND*
+
+: Play a WAV or MP3 resource on correct keystrokes, and on incorrect keystrokes unless -error-sound is also set.
+
+-error-sound *SOUND*
+
+: Play a WAV or MP3 resource on incorrect keystrokes.
 
 ## Scripting
 
@@ -141,7 +160,7 @@ are determined exclusively by the input.
 
 **-list** *TYPE*\
 
-    Lists internal resources of the given type. TYPE=[themes|quotes|words].
+    Lists internal resources of the given type. TYPE=[themes|quotes|words|sounds].
 
 **-v**\
 
@@ -164,7 +183,7 @@ tt -words words.txt -n 10
 Starts a sequence of tests in which each test consists of a paragraph from war
 and peace starting with paragraph 1.
 ```
-tt ~/war_and_peace.txt -start 1
+tt -start 1 ~/war_and_peace.txt
 ```
 
 Produces a test consisting of 40 random words draw from 
@@ -173,12 +192,10 @@ the system dictionary (similar to 'tt -n 40').
 shuf -n 40 /usr/share/dict/words|tt
 ```
 
-Starts a test consisting of two randomly drawn quotes from api.quotable.io and
-prints the output of each test to STDOUT in csv format.
-```
-curl https://api.quotable.io/quotes|\
-    jq '[.results[]|.text=.content|.attribution=.author][:2]'|\
-    tt -quotes - -norreport -csv
+Reads a local JSON quote list from standard input and prints one completed
+result in CSV format on exit.
+```sh
+cat quotes.json | tt -quotes - -oneshot -noreport -csv
 ```
 
 Starts a new typing test which uses the tt source as input:
