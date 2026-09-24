@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gdamore/tcell"
 )
@@ -224,75 +225,134 @@ const (
 	settingsRowCount
 )
 
-var settingsLabels = [settingsRowCount]string{
-	"Show WPM",
-	"Skip word on Space",
-	"Allow Backspace",
-	"Cursor style",
-	"Typed text weight",
-	"Word highlighting",
+// SettingKind describes the value shape a settings row presents to a renderer.
+// The kind is intentionally independent from the formatter so layout code can
+// choose generic affordances without knowing the runtime settings fields.
+type SettingKind int
+
+const (
+	SettingBoolean SettingKind = iota
+	SettingEnum
+	SettingText
+)
+
+// SettingRow contains the declarative metadata needed to render one setting.
+// FormatValue is evaluated against either the effective or saved settings,
+// depending on which value a renderer wants to present.
+type SettingRow struct {
+	Label        string
+	Section      string
+	Kind         SettingKind
+	FormatValue  func(runtimeSettings) string
+	IsOverridden func(settingsOverrides) bool
 }
 
-func settingIsOverridden(row int, overrides settingsOverrides) bool {
-	switch row {
-	case settingShowWPM:
-		return overrides.ShowWPM
-	case settingSkipWord:
-		return overrides.SkipWord
-	case settingAllowBackspace:
-		return overrides.AllowBackspace
-	case settingCursorStyle:
-		return overrides.BlockCursor
-	case settingTypedTextWeight:
-		return overrides.BoldTypedText
-	case settingWordHighlighting:
-		return overrides.Highlight
+const (
+	settingsSectionGeneral    = "General"
+	settingsSectionAppearance = "Appearance"
+)
+
+func formatToggle(value bool) string {
+	if value {
+		return "On"
+	}
+	return "Off"
+}
+
+func formatCursorStyle(settings runtimeSettings) string {
+	if settings.BlockCursor {
+		return "Block"
+	}
+	return "Bar"
+}
+
+func formatTypedTextWeight(settings runtimeSettings) string {
+	if settings.BoldTypedText {
+		return "Bold"
+	}
+	return "Normal"
+}
+
+func formatWordHighlighting(settings runtimeSettings) string {
+	switch settings.Highlight {
+	case highlightCurrentOnly:
+		return "Current only"
+	case highlightNextOnly:
+		return "Next only"
+	case highlightOff:
+		return "Off"
 	default:
+		return "Current + next"
+	}
+}
+
+var settingsRows = [settingsRowCount]SettingRow{
+	{
+		Label:        "Show WPM",
+		Section:      settingsSectionGeneral,
+		Kind:         SettingBoolean,
+		FormatValue:  func(settings runtimeSettings) string { return formatToggle(settings.ShowWPM) },
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.ShowWPM },
+	},
+	{
+		Label:        "Skip word on Space",
+		Section:      settingsSectionGeneral,
+		Kind:         SettingBoolean,
+		FormatValue:  func(settings runtimeSettings) string { return formatToggle(settings.SkipWord) },
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.SkipWord },
+	},
+	{
+		Label:        "Allow Backspace",
+		Section:      settingsSectionGeneral,
+		Kind:         SettingBoolean,
+		FormatValue:  func(settings runtimeSettings) string { return formatToggle(settings.AllowBackspace) },
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.AllowBackspace },
+	},
+	{
+		Label:        "Cursor style",
+		Section:      settingsSectionAppearance,
+		Kind:         SettingEnum,
+		FormatValue:  formatCursorStyle,
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.BlockCursor },
+	},
+	{
+		Label:        "Typed text weight",
+		Section:      settingsSectionAppearance,
+		Kind:         SettingEnum,
+		FormatValue:  formatTypedTextWeight,
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.BoldTypedText },
+	},
+	{
+		Label:        "Word highlighting",
+		Section:      settingsSectionAppearance,
+		Kind:         SettingEnum,
+		FormatValue:  formatWordHighlighting,
+		IsOverridden: func(overrides settingsOverrides) bool { return overrides.Highlight },
+	},
+}
+
+// settingsLabels remains as a compatibility view for callers that only need
+// labels. The row descriptors above are the single source of label metadata.
+var settingsLabels = func() [settingsRowCount]string {
+	var labels [settingsRowCount]string
+	for row, setting := range settingsRows {
+		labels[row] = setting.Label
+	}
+	return labels
+}()
+
+func settingIsOverridden(row int, overrides settingsOverrides) bool {
+	if row < 0 || row >= len(settingsRows) {
 		return false
 	}
+	return settingsRows[row].IsOverridden(overrides)
 }
 
 func settingValue(settings runtimeSettings, row int) string {
-	switch row {
-	case settingShowWPM:
-		if settings.ShowWPM {
-			return "On"
-		}
-		return "Off"
-	case settingSkipWord:
-		if settings.SkipWord {
-			return "On"
-		}
-		return "Off"
-	case settingAllowBackspace:
-		if settings.AllowBackspace {
-			return "On"
-		}
-		return "Off"
-	case settingCursorStyle:
-		if settings.BlockCursor {
-			return "Block"
-		}
-		return "Bar"
-	case settingTypedTextWeight:
-		if settings.BoldTypedText {
-			return "Bold"
-		}
-		return "Normal"
-	case settingWordHighlighting:
-		switch settings.Highlight {
-		case highlightCurrentOnly:
-			return "Current only"
-		case highlightNextOnly:
-			return "Next only"
-		case highlightOff:
-			return "Off"
-		default:
-			return "Current + next"
-		}
-	default:
+	if row < 0 || row >= len(settingsRows) {
 		return ""
 	}
+	return settingsRows[row].FormatValue(settings)
 }
 
 func advanceSetting(settings *runtimeSettings, row int) {
@@ -343,60 +403,304 @@ func mergeDirtySettings(base, draft runtimeSettings, dirty map[int]bool) runtime
 	return base
 }
 
-func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, overrides settingsOverrides, flags flagValues, message string) {
-	const width, height = 52, 14
+const (
+	// settingsMinimumWidth and settingsMinimumHeight retain the modal's
+	// established input gate. Below this size the modal remains read-only so
+	// users cannot accidentally edit settings while the panel is unreadable.
+	settingsMinimumWidth   = 52
+	settingsMinimumHeight  = 14
+	settingsPanelMaxWidth  = 72
+	settingsPanelMaxHeight = 16
+)
+
+func settingsPanelRect(screenWidth, screenHeight int) (Rect, bool) {
+	if screenWidth < settingsMinimumWidth || screenHeight < settingsMinimumHeight {
+		return Rect{}, false
+	}
+
+	width := screenWidth
+	if width > settingsPanelMaxWidth {
+		width = settingsPanelMaxWidth
+	}
+	height := screenHeight
+	if height > settingsPanelMaxHeight {
+		height = settingsPanelMaxHeight
+	}
+	return Rect{
+		X:      (screenWidth - width) / 2,
+		Y:      (screenHeight - height) / 2,
+		Width:  width,
+		Height: height,
+	}, true
+}
+
+func drawSettingsFallback(screen tcell.Screen, styles Styles) {
+	screenWidth, screenHeight := screen.Size()
+	message := TruncateCells("Terminal too small for settings (need 52x14)", screenWidth)
+	x := (screenWidth - CellWidth(message)) / 2
+	if x < 0 {
+		x = 0
+	}
+	y := screenHeight / 2
+	DrawText(screen, x, y, message, styles.Warning)
+}
+
+func settingsRowStyle(style tcell.Style, selected bool, styles Styles) tcell.Style {
+	if selected {
+		_, selectedBG, _ := styles.SelectedRow.Decompose()
+		return style.Background(selectedBG)
+	}
+	return style
+}
+
+func settingDisplayValue(setting SettingRow, value string) string {
+	if setting.Kind != SettingBoolean {
+		return value
+	}
+	if value == "On" {
+		return "● On"
+	}
+	return "○ Off"
+}
+
+func drawSettingsRow(screen tcell.Screen, content Rect, row, selected int, active runtimeSettings, overrides settingsOverrides, styles Styles) {
+	if row < 0 || row >= len(settingsRows) || content.Width <= 0 || content.Height <= 0 {
+		return
+	}
+	drawSettingsRowAt(screen, content, content.Y+row, row, selected, active, overrides, styles)
+}
+
+func drawSettingsRowAt(screen tcell.Screen, content Rect, y, row, selected int, active runtimeSettings, overrides settingsOverrides, styles Styles) {
+	if row < 0 || row >= len(settingsRows) || content.Width <= 0 {
+		return
+	}
+
+	setting := settingsRows[row]
+	isSelected := row == selected
+	rowStyle := settingsRowStyle(styles.Text, isSelected, styles)
+	// Paint the complete content width first. This makes selection readable even
+	// when the label is short and keeps the accent state stable as values change.
+	DrawTextInRect(screen, Rect{X: content.X, Y: y, Width: content.Width, Height: 1},
+		PadCells("", content.Width), rowStyle)
+
+	value := settingDisplayValue(setting, settingValue(active, row))
+	valueWidth := CellWidth(value)
+	if valueWidth < 1 {
+		valueWidth = 1
+	}
+	if valueWidth > content.Width-2 {
+		valueWidth = content.Width - 2
+		if valueWidth < 1 {
+			valueWidth = 1
+		}
+	}
+
+	status := ""
+	if settingIsOverridden(row, overrides) {
+		status = "CLI override"
+	}
+	statusWidth := CellWidth(status)
+	labelWidth := content.Width - 2 - valueWidth - 1
+	if statusWidth > 0 {
+		labelWidth -= statusWidth + 1
+	}
+	// Keep the value visible first, then drop status before allowing a
+	// malformed narrow write. The full gate remains intentionally 52x14.
+	if labelWidth < 1 && statusWidth > 0 {
+		status = ""
+		statusWidth = 0
+		labelWidth = content.Width - 2 - valueWidth - 1
+	}
+	if labelWidth < 1 {
+		labelWidth = 1
+		valueWidth = content.Width - 3
+		if valueWidth < 1 {
+			valueWidth = 1
+		}
+	}
+
+	marker := "  "
+	if isSelected {
+		marker = "› "
+	}
+	DrawTextInRect(screen, Rect{X: content.X, Y: y, Width: 2, Height: 1}, marker,
+		settingsRowStyle(styles.Indicator, isSelected, styles))
+
+	label := TruncateCells(setting.Label, labelWidth)
+	labelStyle := styles.Text
+	if isSelected {
+		labelStyle = styles.SelectedRow
+	}
+	DrawTextInRect(screen, Rect{
+		X: content.X + 2, Y: y, Width: labelWidth, Height: 1,
+	}, label, settingsRowStyle(labelStyle, isSelected, styles))
+
+	valueX := content.X + content.Width - valueWidth
+	valueStyle := styles.Value
+	if setting.Kind == SettingBoolean {
+		if strings.HasPrefix(value, "●") {
+			valueStyle = styles.Success
+		} else {
+			valueStyle = styles.Muted
+		}
+	} else if isSelected {
+		valueStyle = styles.Key
+	}
+	valueStyle = settingsRowStyle(valueStyle, isSelected, styles)
+	DrawTextInRect(screen, Rect{X: valueX, Y: y, Width: valueWidth, Height: 1},
+		AlignRightCells(value, valueWidth), valueStyle)
+
+	if status != "" {
+		statusX := valueX - statusWidth - 1
+		if statusX < content.X+2+labelWidth+1 {
+			availableStatus := valueX - (content.X + 2 + labelWidth + 1)
+			if availableStatus < 1 {
+				availableStatus = 1
+			}
+			status = TruncateCells(status, availableStatus)
+			statusWidth = CellWidth(status)
+			statusX = valueX - statusWidth - 1
+		}
+		if statusWidth > 0 {
+			DrawTextInRect(screen, Rect{X: statusX, Y: y, Width: statusWidth, Height: 1},
+				status, settingsRowStyle(styles.Subtle, isSelected, styles))
+		}
+	}
+}
+
+func drawSettingsFooter(screen tcell.Screen, content Rect, y int, styles Styles) {
+	if content.Width <= 0 {
+		return
+	}
+	DrawRule(screen, content.X, y, content.Width, '─', styles.Border)
+	if content.Height < 2 {
+		return
+	}
+
+	type hint struct {
+		key, action string
+	}
+	hints := []hint{
+		{"↑↓", "Navigate"},
+		{"Space", "Toggle"},
+		{"Enter", "Change"},
+		{"Esc", "Close"},
+	}
+	if content.Width < 56 {
+		hints = []hint{
+			{"↑↓", "Select"},
+			{"Space/Enter", "Apply"},
+			{"Esc", "Close"},
+		}
+	}
+
+	x := content.X
+	end := content.X + content.Width
+	for i, item := range hints {
+		separator := 0
+		if i > 0 {
+			separator = CellWidth(" · ")
+		}
+		needed := separator + CellWidth(item.key) + 1 + CellWidth(item.action)
+		if x+needed > end {
+			break
+		}
+		if i > 0 {
+			DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: 3, Height: 1},
+				" · ", styles.Subtle)
+			x += separator
+		}
+		keyWidth := CellWidth(item.key)
+		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: keyWidth, Height: 1},
+			item.key, styles.Key)
+		x += keyWidth
+		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: 1, Height: 1},
+			" ", styles.FooterText)
+		x++
+		actionWidth := CellWidth(item.action)
+		DrawTextInRect(screen, Rect{X: x, Y: y + 1, Width: actionWidth, Height: 1},
+			item.action, styles.FooterText)
+		x += actionWidth
+	}
+}
+
+func drawSettings(screen tcell.Screen, selected int, draft runtimeSettings, overrides settingsOverrides, flags flagValues, message string, styles Styles) {
 	screen.Clear()
 	screen.HideCursor()
-	screen.SetStyle(tcell.StyleDefault)
+	screen.SetStyle(styles.Text)
 
 	screenWidth, screenHeight := screen.Size()
-	if screenWidth < width || screenHeight < height {
-		drawStringAtCenter(screen, "Terminal too small for settings (need 52x14)", tcell.StyleDefault)
+	panel, ok := settingsPanelRect(screenWidth, screenHeight)
+	if !ok {
+		drawSettingsFallback(screen, styles)
 		screen.Show()
 		return
 	}
 
-	x := (screenWidth - width) / 2
-	y := (screenHeight - height) / 2
-	for column := 0; column < width; column++ {
-		screen.SetContent(x+column, y, '-', nil, tcell.StyleDefault)
-		screen.SetContent(x+column, y+height-1, '-', nil, tcell.StyleDefault)
-	}
-	for line := 1; line < height-1; line++ {
-		screen.SetContent(x, y+line, '|', nil, tcell.StyleDefault)
-		screen.SetContent(x+width-1, y+line, '|', nil, tcell.StyleDefault)
-	}
-	drawString(screen, x+(width-len("Settings"))/2, y+1, "Settings", -1, tcell.StyleDefault.Bold(true))
-	active := effectiveRuntimeSettings(draft, overrides, flags)
-	for row, label := range settingsLabels {
-		marker := " "
-		if row == selected {
-			marker = ">"
-		}
-		line := fmt.Sprintf("%s %s: %s", marker, label, settingValue(active, row))
-		if settingIsOverridden(row, overrides) {
-			line += "  CLI override"
-			if row == selected {
-				savedValue := "Saved: " + settingValue(draft, row)
-				drawString(screen, x+(width-len(savedValue))/2, y+2, savedValue, -1, tcell.StyleDefault)
-			}
-		}
-		drawString(screen, x+2, y+3+row, line, -1, tcell.StyleDefault)
+	DrawBox(screen, panel, NormalBorder(), styles.Border)
+	inner := panel.Inset(1)
+	if inner.Width <= 0 || inner.Height <= 0 {
+		screen.Show()
+		return
 	}
 
-	drawString(screen, x+5, y+10, "Up/Down select · Space/Enter change", -1, tcell.StyleDefault)
-	drawString(screen, x+13, y+11, "Esc/Ctrl-P save & close", -1, tcell.StyleDefault)
+	paddingX := 2
+	if inner.Width < 40 {
+		paddingX = 1
+	}
+	content := Rect{
+		X:      inner.X + paddingX,
+		Y:      inner.Y,
+		Width:  inner.Width - paddingX*2,
+		Height: inner.Height,
+	}
+	if content.Width <= 0 || content.Height <= 0 {
+		screen.Show()
+		return
+	}
+
+	active := effectiveRuntimeSettings(draft, overrides, flags)
+	subtitle := "Configure typing behavior and appearance"
+	subtitleStyle := styles.Subtitle
 	if message != "" {
-		runes := []rune("Error: " + message)
-		if len(runes) > width-4 {
-			runes = runes[:width-4]
+		subtitle = "Error: " + message
+		subtitleStyle = styles.Error
+	} else if selected >= 0 && selected < len(settingsRows) && settingIsOverridden(selected, overrides) {
+		subtitle = "Saved: " + settingValue(draft, selected) + " · CLI override"
+	}
+	DrawTextInRect(screen, Rect{X: content.X, Y: content.Y, Width: content.Width, Height: 1},
+		"Settings", styles.AppTitle)
+	if content.Height > 1 {
+		DrawTextInRect(screen, Rect{X: content.X, Y: content.Y + 1, Width: content.Width, Height: 1},
+			subtitle, subtitleStyle)
+	}
+
+	footerY := content.Y + content.Height - 2
+	bodyBottom := footerY
+	nextY := content.Y + 2
+	for row := 0; row < len(settingsRows) && nextY < bodyBottom; {
+		section := settingsRows[row].Section
+		DrawTextInRect(screen, Rect{X: content.X, Y: nextY, Width: content.Width, Height: 1},
+			strings.ToUpper(section), styles.SectionTitle)
+		nextY++
+		for row < len(settingsRows) && settingsRows[row].Section == section && nextY < bodyBottom {
+			drawSettingsRowAt(screen, content, nextY, row, selected, active, overrides, styles)
+			nextY++
+			row++
 		}
-		drawString(screen, x+2, y+12, string(runes), -1, tcell.StyleDefault)
+	}
+
+	if footerY >= content.Y && footerY+1 < content.Y+content.Height {
+		drawSettingsFooter(screen, content, footerY, styles)
 	}
 	screen.Show()
 }
 
-func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides settingsOverrides, flags flagValues) (committed bool, interrupted bool) {
+func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides settingsOverrides, flags flagValues, styles ...Styles) (committed bool, interrupted bool) {
+	activeStyles := DefaultStyles
+	if len(styles) > 0 {
+		activeStyles = styles[0]
+	}
 	draft := *saved
 	dirty := make(map[int]bool)
 	selected := 0
@@ -404,7 +708,7 @@ func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides setting
 	message := ""
 
 	for {
-		drawSettings(screen, selected, draft, overrides, flags, message)
+		drawSettings(screen, selected, draft, overrides, flags, message, activeStyles)
 		event := screen.PollEvent()
 		switch event := event.(type) {
 		case *tcell.EventResize:
@@ -435,7 +739,7 @@ func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides setting
 			}
 
 			screenWidth, screenHeight := screen.Size()
-			if screenWidth < 52 || screenHeight < 14 {
+			if screenWidth < settingsMinimumWidth || screenHeight < settingsMinimumHeight {
 				continue
 			}
 			switch event.Key() {

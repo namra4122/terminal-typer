@@ -52,6 +52,7 @@ type typer struct {
 	baseCorrectStyle    tcell.Style
 	baseCurrentStyle    tcell.Style
 	baseNextStyle       tcell.Style
+	styles              Styles
 
 	savedSettings runtimeSettings
 	settings      runtimeSettings
@@ -64,9 +65,22 @@ type typer struct {
 
 func NewTyper(scr tcell.Screen, emboldenTypedText bool, fgcol, bgcol, hicol, hicol2, hicol3, errcol tcell.Color) *typer {
 	var tty io.Writer
-	def := tcell.StyleDefault.
-		Foreground(fgcol).
-		Background(bgcol)
+	theme := Theme{
+		Background:  bgcol,
+		Text:        fgcol,
+		Muted:       fgcol,
+		Subtle:      fgcol,
+		Border:      fgcol,
+		BorderFocus: hicol2,
+		Accent:      hicol2,
+		Success:     hicol,
+		Warning:     hicol3,
+		Error:       errcol,
+		Info:        hicol3,
+		SelectedBG:  bgcol,
+	}
+	styles := NewStyles(theme)
+	def := styles.Text
 
 	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 	//Will fail on windows, but tt is still mostly usable via tcell
@@ -74,7 +88,7 @@ func NewTyper(scr tcell.Screen, emboldenTypedText bool, fgcol, bgcol, hicol, hic
 		tty = ioutil.Discard
 	}
 
-	correctStyle := def.Foreground(hicol)
+	correctStyle := styles.Success
 	if emboldenTypedText {
 		correctStyle = correctStyle.Bold(true)
 	}
@@ -87,13 +101,14 @@ func NewTyper(scr tcell.Screen, emboldenTypedText bool, fgcol, bgcol, hicol, hic
 
 		defaultStyle:        def,
 		correctStyle:        correctStyle,
-		currentWordStyle:    def.Foreground(hicol2),
-		nextWordStyle:       def.Foreground(hicol3),
-		incorrectStyle:      def.Foreground(errcol),
-		incorrectSpaceStyle: def.Background(errcol),
-		baseCorrectStyle:    def.Foreground(hicol),
-		baseCurrentStyle:    def.Foreground(hicol2),
-		baseNextStyle:       def.Foreground(hicol3),
+		currentWordStyle:    def.Foreground(theme.Accent),
+		nextWordStyle:       def.Foreground(theme.Info),
+		incorrectStyle:      styles.Error,
+		incorrectSpaceStyle: def.Background(theme.Error),
+		baseCorrectStyle:    styles.Success,
+		baseCurrentStyle:    def.Foreground(theme.Accent),
+		baseNextStyle:       def.Foreground(theme.Info),
+		styles:              styles,
 	}
 }
 
@@ -214,6 +229,20 @@ func extractMistypedWords(text []rune, typed []rune) (mistakes []mistake) {
 
 	return
 }
+func typerTextDimensions(s string) (width, height int) {
+	width = CellWidth(s)
+	if s == "" {
+		return width, 0
+	}
+
+	height = 1
+	for _, r := range s {
+		if r == '\n' {
+			height++
+		}
+	}
+	return width, height
+}
 
 func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, attribution string) (nerrs int, ncorrect int, rc int, duration time.Duration, mistakes []mistake) {
 	var startTime time.Time
@@ -221,7 +250,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 	typed := make([]rune, len(text))
 
 	sw, sh := t.Scr.Size()
-	nc, nr := calcStringDimensions(s)
+	nc, nr := typerTextDimensions(s)
 	x := (sw - nc) / 2
 	y := (sh - nr) / 2
 
@@ -267,7 +296,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 				continue
 			}
 
-			if i == idx {
+			if i == idx && cx >= 0 && cx < sw && cy >= 0 && cy < sh {
 				t.Scr.ShowCursor(cx, cy)
 				inword = 0
 			}
@@ -292,24 +321,30 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 				style = t.correctStyle
 			}
 
-			t.Scr.SetContent(cx, cy, text[i], nil, style)
-			cx++
+			cx, cy = DrawText(t.Scr, cx, cy, string(text[i]), style)
 		}
 
-		aw, ah := calcStringDimensions(attribution)
-		drawString(t.Scr, x+nc-aw, y+nr+1, attribution, -1, t.defaultStyle)
+		aw, ah := typerTextDimensions(attribution)
+		if attribution != "" {
+			attributionX := x + nc - aw
+			attributionY := y + nr + 1
+			DrawTextInRect(t.Scr, Rect{X: attributionX, Y: attributionY, Width: sw, Height: sh - attributionY},
+				TruncateCells(attribution, sw), t.styles.Muted)
+		}
 
 		if timeLimit != -1 && !startTime.IsZero() {
 			remaining := timeLimit - t.now().Sub(startTime)
-			drawString(t.Scr, x+nc/2, y+nr+ah+1, "      ", -1, t.defaultStyle)
-			drawString(t.Scr, x+nc/2, y+nr+ah+1, strconv.Itoa(int(remaining/1e9)+1), -1, t.defaultStyle)
+			timerX := x + nc/2
+			timerY := y + nr + ah + 1
+			DrawText(t.Scr, timerX, timerY, "      ", t.defaultStyle)
+			DrawText(t.Scr, timerX, timerY, strconv.Itoa(int(remaining/1e9)+1), t.styles.Info)
 		}
 
 		if t.ShowWpm && !startTime.IsZero() {
 			calcStats()
 			if duration > 1e7 { //Avoid flashing large numbers on test start.
 				wpm := int((float64(ncorrect) / 5) / (float64(duration) / 60e9))
-				drawString(t.Scr, x+nc/2-4, y-2, fmt.Sprintf("WPM: %-10d\n", wpm), -1, t.defaultStyle)
+				DrawText(t.Scr, x+nc/2-4, y-2, fmt.Sprintf("WPM: %-10d", wpm), t.styles.Info)
 			}
 		}
 
@@ -382,7 +417,7 @@ func (t *typer) start(s string, timeLimit time.Duration, startImmediately bool, 
 
 			if ev.Key() == tcell.KeyCtrlP {
 				opened := t.now()
-				committed, interrupted := showSettings(t.Scr, &t.savedSettings, t.overrides, t.flagValues)
+				committed, interrupted := showSettings(t.Scr, &t.savedSettings, t.overrides, t.flagValues, t.styles)
 				if !startTime.IsZero() {
 					startTime = startTime.Add(t.now().Sub(opened))
 				}
