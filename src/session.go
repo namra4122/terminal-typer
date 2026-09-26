@@ -51,6 +51,8 @@ type Session struct {
 	State                                    SessionState
 	Cursor                                   int
 	Typed                                    []rune
+	promptText                               string
+	promptRunes                              []rune
 	Events                                   []InputEvent
 	StartedAtNS, LastAtNS, ActiveNS, PauseNS int64
 	PauseReasons                             map[string]bool
@@ -74,20 +76,13 @@ func NewSession(test *Test, attemptID, promptID string) *Session {
 			prompt.WriteString(part.Text)
 		}
 	}
-	typed := make([]rune, len([]rune(prompt.String())))
-	return &Session{AttemptID: attemptID, PromptID: promptID, Test: test, State: SessionReady, Typed: typed, PauseReasons: map[string]bool{}}
+	promptText := prompt.String()
+	promptRunes := []rune(promptText)
+	typed := make([]rune, len(promptRunes))
+	return &Session{AttemptID: attemptID, PromptID: promptID, Test: test, State: SessionReady, Typed: typed, promptText: promptText, promptRunes: promptRunes, PauseReasons: map[string]bool{}}
 }
 func (s *Session) prompt() []rune {
-	var b strings.Builder
-	if s.Test != nil {
-		for i, p := range s.Test.Segments {
-			if i > 0 {
-				b.WriteByte('\n')
-			}
-			b.WriteString(p.Text)
-		}
-	}
-	return []rune(b.String())
+	return s.promptRunes
 }
 func (s *Session) settle(at int64) error {
 	if at < s.LastAtNS {
@@ -107,10 +102,14 @@ func (s *Session) Apply(in SessionInput) error {
 	if s == nil || in.AtNS < 0 {
 		return ErrInvalidInput
 	}
+	var textRune rune
 	switch in.Kind {
 	case InputText:
-		r := []rune(in.Text)
-		if !utf8.ValidString(in.Text) || len(r) != 1 || !unicode.IsPrint(r[0]) {
+		if !utf8.ValidString(in.Text) || utf8.RuneCountInString(in.Text) != 1 {
+			return ErrInvalidInput
+		}
+		textRune, _ = utf8.DecodeRuneInString(in.Text)
+		if !unicode.IsPrint(textRune) {
 			return ErrInvalidInput
 		}
 	case InputBackspace, InputDeleteWord, InputSkip, InputNext, InputPrevious, InputTick:
@@ -151,7 +150,6 @@ func (s *Session) Apply(in SessionInput) error {
 	}
 	switch in.Kind {
 	case InputText:
-		r := []rune(in.Text)
 		if s.Cursor >= len(p) {
 			return nil
 		}
@@ -159,7 +157,7 @@ func (s *Session) Apply(in SessionInput) error {
 			s.State = SessionRunning
 			s.StartedAtNS = in.AtNS
 		}
-		s.Typed[s.Cursor] = r[0]
+		s.Typed[s.Cursor] = textRune
 		s.Cursor++
 		for s.Cursor < len(p) && p[s.Cursor] == '\n' {
 			s.Typed[s.Cursor] = p[s.Cursor]
@@ -217,6 +215,7 @@ func (s *Session) Apply(in SessionInput) error {
 }
 func (s *Session) Snapshot() Session {
 	cp := *s
+	cp.promptRunes = append([]rune(nil), s.promptRunes...)
 	cp.Typed = append([]rune(nil), s.Typed...)
 	cp.Events = append([]InputEvent(nil), s.Events...)
 	cp.PauseReasons = make(map[string]bool, len(s.PauseReasons))

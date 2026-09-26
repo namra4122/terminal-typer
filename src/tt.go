@@ -552,7 +552,7 @@ func main() {
 		stdinData = b
 	}
 	testFn := newTestGenerator(config, stdinData)
-	if os.Getenv("TT_UI") == "charm" && charmInvocationSupported(config, visitedFlags) {
+	if os.Getenv("TT_UI") == "charm" && charmInvocationSupported(config, visitedFlags, isatty.IsTerminal(os.Stdin.Fd())) {
 		generated := testFn()
 		if generated == nil {
 			exit(0)
@@ -666,8 +666,8 @@ func main() {
 		}
 	}
 }
-func charmInvocationSupported(config TestConfig, visited map[string]bool) bool {
-	if !isatty.IsTerminal(os.Stdin.Fd()) || config.Source != wordSource {
+func charmInvocationSupported(config TestConfig, visited map[string]bool, stdinIsTerminal bool) bool {
+	if !stdinIsTerminal || config.Source != wordSource {
 		return false
 	}
 	for name := range visited {

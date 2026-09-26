@@ -75,10 +75,11 @@ func TestSessionSnapshotDoesNotShareMutableState(t *testing.T) {
 	}
 	copy := s.Snapshot()
 	copy.Typed[0] = 'z'
+	copy.promptRunes[0] = 'z'
 	copy.Events[0].Text = "z"
 	copy.PauseReasons["external"] = true
 	copy.Test.Segments[0].Text = "changed"
-	if s.Typed[0] != 'a' || s.Events[0].Text != "a" || s.PauseReasons["external"] || s.Test.Segments[0].Text != "abc" {
+	if s.Typed[0] != 'a' || s.Events[0].Text != "a" || s.PauseReasons["external"] || s.Test.Segments[0].Text != "abc" || string(s.prompt()) != "abc" {
 		t.Fatal("snapshot shares mutable state with session")
 	}
 }

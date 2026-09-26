@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -17,9 +20,81 @@ func TestCharmKeepsGraphemeClusterTogetherAtScalarCursor(t *testing.T) {
 	settings := defaultRuntimeSettings()
 	settings.Highlight = highlightOff
 	model := appModel{session: session, settings: settings}
-	content := model.View().Content
-	if !strings.Contains(content, "▏e\u0301") || strings.Contains(content, "e▏\u0301") {
-		t.Fatalf("cursor split a grapheme cluster: %q", content)
+	view := model.View()
+	if !strings.Contains(view.Content, "e\u0301") || strings.Contains(view.Content, "e▏\u0301") {
+		t.Fatalf("renderer split a grapheme cluster: %q", view.Content)
+	}
+	if view.Cursor == nil || view.Cursor.X != 0 || view.Cursor.Y != 2 {
+		t.Fatalf("native cursor position = %#v; want x=0 y=2", view.Cursor)
+	}
+}
+
+func TestCharmExpiryClampsLateInputAtTimeLimit(t *testing.T) {
+	session := testSession("alpha")
+	model := appModel{
+		session:   session,
+		settings:  defaultRuntimeSettings(),
+		timeLimit: 0,
+	}
+	first, _ := model.Update(tea.KeyPressMsg(tea.Key{Text: "a", Code: 'a'}))
+	model = first.(appModel)
+	late, _ := model.Update(tea.KeyPressMsg(tea.Key{Text: "b", Code: 'b'}))
+	model = late.(appModel)
+	if model.session.State != SessionExpired || model.session.ActiveNS != 0 || model.session.Typed[0] != 'a' || model.session.Typed[1] != 0 {
+		t.Fatalf("late input exceeded expiry: state=%s active=%d typed=%q", model.session.State, model.session.ActiveNS, string(model.session.Typed))
+	}
+}
+
+func TestCharmGuardsResultActionsFor200Milliseconds(t *testing.T) {
+	session := testSession("a")
+	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: sessionNow()}); err != nil {
+		t.Fatal(err)
+	}
+	model := appModel{
+		session:         session,
+		settings:        defaultRuntimeSettings(),
+		timeLimit:       -1,
+		resultReadyAtNS: sessionNow() + int64(time.Second),
+		generateTest:    func() *Test { return testSession("next").Test },
+	}
+	value, cmd := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = value.(appModel)
+	if cmd != nil || model.generating {
+		t.Fatal("result action activated inside the 200 ms guard")
+	}
+	model.resultReadyAtNS = sessionNow() - int64(200*time.Millisecond) - 1
+	value, cmd = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = value.(appModel)
+	if cmd == nil || !model.generating {
+		t.Fatal("result action remained blocked after the guard")
+	}
+}
+
+func TestCharmScrollsLongPromptAroundCurrentWord(t *testing.T) {
+	var prompt strings.Builder
+	for i := range 100 {
+		fmt.Fprintf(&prompt, "word%03d ", i)
+	}
+	session := testSession(strings.TrimSpace(prompt.String()))
+	for i := range 90 {
+		if err := session.Apply(SessionInput{Kind: InputSkip, AtNS: int64(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings := defaultRuntimeSettings()
+	settings.Highlight = highlightOff
+	model := appModel{
+		session:  session,
+		settings: settings,
+		width:    52,
+		height:   14,
+	}
+	view := model.View()
+	if !strings.Contains(view.Content, "word090") || strings.Contains(view.Content, "word000") || !strings.Contains(view.Content, "…") {
+		t.Fatalf("viewport did not follow the active word: %q", view.Content)
+	}
+	if view.Cursor == nil || view.Cursor.X < 0 || view.Cursor.X >= model.width || view.Cursor.Y >= model.height {
+		t.Fatalf("native cursor escaped the visible viewport: %#v", view.Cursor)
 	}
 }
 
@@ -50,8 +125,11 @@ func TestCharmGeneratedGroupsCompleteWithBasicMetrics(t *testing.T) {
 			t.Fatalf("basic result missing %q: %s", metric, result)
 		}
 	}
-}
+	if strings.Contains(result, "NaN") || strings.Contains(result, "Inf") {
+		t.Fatalf("basic result contains non-finite metrics: %s", result)
 
+	}
+}
 func TestCharmRestartSafeguardPreservesThenRetriesPrompt(t *testing.T) {
 	s := testSession("alpha beta")
 	for i, r := range []rune("alpha") {
@@ -103,6 +181,40 @@ func TestCharmSettingsSaveFailureKeepsDraftAndOverlay(t *testing.T) {
 	}
 }
 
+func TestCharmSettingsSaveCommitsMergedDraftAndResumes(t *testing.T) {
+	originalPath := RUNTIME_SETTINGS_DB
+	defer func() { RUNTIME_SETTINGS_DB = originalPath }()
+	RUNTIME_SETTINGS_DB = filepath.Join(t.TempDir(), "settings.json")
+	saved := defaultRuntimeSettings()
+	draft := saved
+	draft.ShowWPM = true
+	session := testSession("alpha beta")
+	now := sessionNow()
+	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Apply(SessionInput{Kind: InputPause, Reason: "settings", AtNS: sessionNow()}); err != nil {
+		t.Fatal(err)
+	}
+	model := appModel{
+		session:       session,
+		saved:         saved,
+		settings:      saved,
+		draftSettings: draft,
+		settingsOpen:  true,
+		dirty:         map[int]bool{settingShowWPM: true},
+	}
+	updated, _ := model.Update(model.saveSettings()())
+	model = updated.(appModel)
+	persisted, err := loadPersistedSettings(RUNTIME_SETTINGS_DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.settingsOpen || model.saved != draft || model.settings != draft || model.session.State != SessionRunning || model.session.PauseReasons["settings"] || persisted != draft {
+		t.Fatalf("settings save failed to commit and resume: open=%v active=%#v saved=%#v session=%#v persisted=%#v", model.settingsOpen, model.settings, model.saved, model.session, persisted)
+	}
+}
+
 func TestCharmNavigationCachesTestsAndMarksRetries(t *testing.T) {
 	firstTest := &Test{Config: TestConfig{TimeLimit: -1}, Segments: []segment{{Text: "first"}}}
 	secondTest := &Test{Config: TestConfig{TimeLimit: -1}, Segments: []segment{{Text: "second"}}}
@@ -136,5 +248,60 @@ func TestCharmNavigationCachesTestsAndMarksRetries(t *testing.T) {
 	model = value.(appModel)
 	if model.testIndex != 1 || model.session.RetryOf != secondAttempt || generated != 1 {
 		t.Fatalf("cached next prompt was not retried: index=%d retry=%q generated=%d", model.testIndex, model.session.RetryOf, generated)
+	}
+}
+
+func TestCharmResizePreservesAttemptAcrossMinimumSize(t *testing.T) {
+	session := testSession("alpha beta")
+	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	promptID := session.PromptID
+	typed := append([]rune(nil), session.Typed...)
+	model := appModel{session: session, settings: defaultRuntimeSettings()}
+	for _, size := range []struct {
+		width, height int
+		tooSmall      bool
+	}{
+		{80, 24, false},
+		{52, 14, false},
+		{40, 10, true},
+		{80, 24, false},
+	} {
+		value, _ := model.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+		model = value.(appModel)
+		if model.tooSmall != size.tooSmall {
+			t.Fatalf("size %dx%d tooSmall=%v", size.width, size.height, model.tooSmall)
+		}
+	}
+	if model.session.PromptID != promptID || model.session.Cursor != 1 || !reflect.DeepEqual(model.session.Typed, typed) || model.session.State != SessionRunning {
+		t.Fatalf("resize changed active attempt: %#v", model.session)
+	}
+}
+
+func TestCharmRouteRejectsUnsupportedInvocation(t *testing.T) {
+	config := TestConfig{Source: wordSource}
+	allowed := map[string]bool{
+		"n": true, "g": true, "t": true, "showwpm": true, "noskip": true,
+		"nobackspace": true, "blockcursor": true, "bold": true,
+		"nohighlight": true, "highlight1": true, "highlight2": true,
+	}
+	if !charmInvocationSupported(config, allowed, true) {
+		t.Fatal("supported word-test invocation did not select Charm")
+	}
+	if charmInvocationSupported(config, allowed, false) {
+		t.Fatal("non-terminal stdin selected Charm")
+	}
+	for _, source := range []testSource{quoteSource, stdinSource, fileSource} {
+		config.Source = source
+		if charmInvocationSupported(config, nil, true) {
+			t.Fatalf("source %q selected Charm", source)
+		}
+	}
+	config.Source = wordSource
+	for _, name := range []string{"start", "w", "v", "words", "quotes", "notheme", "oneshot", "noreport", "csv", "json", "raw", "multi", "theme", "list", "sound", "error-sound"} {
+		if charmInvocationSupported(config, map[string]bool{name: true}, true) {
+			t.Fatalf("unsupported flag %q selected Charm", name)
+		}
 	}
 }

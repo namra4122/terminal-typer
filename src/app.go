@@ -35,29 +35,32 @@ type settingsSavedMsg struct {
 	err      error
 }
 type appModel struct {
-	session        *Session
-	width, height  int
-	settings       runtimeSettings
-	saved          runtimeSettings
-	draftSettings  runtimeSettings
-	overrides      settingsOverrides
-	flags          flagValues
-	settingsOpen   bool
-	selected       int
-	meaningful     bool
-	restartPending bool
-	tooSmall       bool
-	timeLimit      time.Duration
-	quitting       bool
-	dirty          map[int]bool
-	message        string
-	tests          []*testEntry
-	testIndex      int
-	generateTest   func() *Test
-	attempts       map[string]string
-	generating     bool
-	testError      string
-	savingSettings bool
+	session             *Session
+	width, height       int
+	settings            runtimeSettings
+	saved               runtimeSettings
+	draftSettings       runtimeSettings
+	overrides           settingsOverrides
+	flags               flagValues
+	settingsOpen        bool
+	selected            int
+	meaningful          bool
+	processedEventCount int
+	textInputCount      int
+	restartPending      bool
+	tooSmall            bool
+	timeLimit           time.Duration
+	quitting            bool
+	dirty               map[int]bool
+	message             string
+	tests               []*testEntry
+	testIndex           int
+	generateTest        func() *Test
+	attempts            map[string]string
+	generating          bool
+	testError           string
+	savingSettings      bool
+	resultReadyAtNS     int64
 }
 type appTick time.Time
 
@@ -110,17 +113,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restartPending = false
 			m.session.RestartUntilNS = 0
 		}
-		if m.timeLimit >= 0 && m.session.State == SessionRunning && time.Duration(m.session.ActiveNS) >= m.timeLimit {
-			m.session.State = SessionExpired
-		}
+		m.expireIfNeeded(now)
 		return m, tickCmd()
 	case tea.KeyPressMsg:
 		key := v.String()
 		now := sessionNow()
-		_ = m.session.Apply(SessionInput{Kind: InputTick, AtNS: now})
-		if m.timeLimit >= 0 && m.session.State == SessionRunning && time.Duration(m.session.ActiveNS) >= m.timeLimit {
-			m.session.State = SessionExpired
-		}
+		m.expireIfNeeded(now)
 		if m.generating || m.tooSmall || m.savingSettings {
 			if key == "ctrl+c" {
 				m.quitting = true
@@ -129,6 +127,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key == "ctrl+l" {
 				return m, nil
 			}
+			return m, nil
+		}
+		if (m.session.State == SessionCompleted || m.session.State == SessionExpired) && key != "ctrl+c" && key != "ctrl+l" && now-m.resultReadyAtNS < int64(200*time.Millisecond) {
 			return m, nil
 		}
 		switch key {
@@ -230,6 +231,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.session.Apply(SessionInput{Kind: InputText, Text: " ", AtNS: now})
 				m.refreshMeaningful()
 			}
+			m.markResultReady(now)
 			return m, nil
 		case "backspace", "ctrl+backspace", "ctrl+w":
 			if m.settingsOpen || !m.settings.AllowBackspace {
@@ -255,18 +257,48 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshMeaningful()
 			}
 		}
+		m.markResultReady(now)
+		return m, nil
 	}
 	return m, nil
 }
 
 func (m *appModel) refreshMeaningful() {
-	textInputs := 0
-	for _, event := range m.session.Events {
-		if event.Kind == InputText {
-			textInputs++
+	events := m.session.Events
+	for i := m.processedEventCount; i < len(events); i++ {
+		if events[i].Kind == InputText {
+			m.textInputCount++
 		}
 	}
-	m.meaningful = textInputs >= 5 || m.session.ActiveNS >= int64(2*time.Second)
+	m.processedEventCount = len(events)
+	if m.textInputCount >= 5 || m.session.ActiveNS >= int64(2*time.Second) {
+		m.meaningful = true
+	}
+}
+
+func (m *appModel) expireIfNeeded(now int64) {
+	if m.timeLimit >= 0 && m.session.State == SessionRunning && m.session.ActiveNS >= int64(m.timeLimit) {
+		m.session.ActiveNS = int64(m.timeLimit)
+		m.session.State = SessionExpired
+		m.markResultReady(now)
+	}
+}
+
+func (m *appModel) markResultReady(now int64) {
+	if (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.resultReadyAtNS == 0 {
+		m.resultReadyAtNS = now
+	}
+}
+
+func appCursor(x, y int, block bool) *tea.Cursor {
+	cursor := tea.NewCursor(x, y)
+	if block {
+		cursor.Shape = tea.CursorBlock
+	} else {
+		cursor.Shape = tea.CursorBar
+	}
+	cursor.Blink = true
+	return cursor
 }
 
 func promptWordRanges(prompt []rune, cursor int) (currentStart, currentEnd, nextStart, nextEnd int) {
@@ -303,6 +335,99 @@ func promptWordRanges(prompt []rune, cursor int) (currentStart, currentEnd, next
 		nextEnd++
 	}
 	return
+}
+
+func promptViewport(prompt string, cursor, width, rows int) (start, end, startLine int, scrolled bool) {
+	if width < 1 {
+		width = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	promptRuneCount := utf8.RuneCountInString(prompt)
+	clusters := uniseg.NewGraphemes(prompt)
+	line, column, scalar, cursorLine := 0, 0, 0, 0
+	for clusters.Next() {
+		cluster := clusters.Str()
+		clusterEnd := scalar + utf8.RuneCountInString(cluster)
+		cursorHere := scalar <= cursor && cursor < clusterEnd
+		clusterWidth := uniseg.StringWidth(cluster)
+		if cluster == "\n" {
+			if cursorHere {
+				cursorLine = line
+			}
+			line++
+			column = 0
+			scalar = clusterEnd
+			continue
+		}
+		if column > 0 && column+clusterWidth > width {
+			line++
+			column = 0
+		}
+		if cursorHere {
+			cursorLine = line
+		}
+		column += clusterWidth
+		scalar = clusterEnd
+	}
+	if cursor >= promptRuneCount {
+		cursorLine = line
+	}
+	totalLines := line + 1
+	if totalLines <= rows {
+		return 0, promptRuneCount, 0, false
+	}
+	visibleLines := rows - 2
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+	startLine = cursorLine - visibleLines/2
+	if startLine < 0 {
+		startLine = 0
+	}
+	if startLine+visibleLines > totalLines {
+		startLine = totalLines - visibleLines
+	}
+	endLine := startLine + visibleLines
+	start, end = -1, promptRuneCount
+	clusters.Reset()
+	line, column, scalar = 0, 0, 0
+	for clusters.Next() {
+		cluster := clusters.Str()
+		clusterEnd := scalar + utf8.RuneCountInString(cluster)
+		if cluster == "\n" {
+			if line == startLine && start < 0 {
+				start = scalar
+			}
+			line++
+			column = 0
+			if line >= endLine {
+				end = clusterEnd
+				break
+			}
+			scalar = clusterEnd
+			continue
+		}
+		clusterWidth := uniseg.StringWidth(cluster)
+		if column > 0 && column+clusterWidth > width {
+			line++
+			column = 0
+		}
+		if line == startLine && start < 0 {
+			start = scalar
+		}
+		if line >= endLine {
+			end = scalar
+			break
+		}
+		column += clusterWidth
+		scalar = clusterEnd
+	}
+	if start < 0 {
+		start = 0
+	}
+	return start, end, startLine, true
 }
 
 func sessionCharacterCounts(session *Session) (correct, total int) {
@@ -342,7 +467,10 @@ func (m *appModel) activateTest(attemptID string) error {
 	m.session = session
 	m.timeLimit = entry.test.Config.TimeLimit
 	m.meaningful = false
+	m.processedEventCount = 0
+	m.textInputCount = 0
 	m.restartPending = false
+	m.resultReadyAtNS = 0
 	m.testError = ""
 	return nil
 }
@@ -361,6 +489,9 @@ func (m *appModel) restartCurrentAttempt() error {
 	m.attempts[m.session.PromptID] = attemptID
 	m.meaningful = false
 	m.restartPending = false
+	m.resultReadyAtNS = 0
+	m.processedEventCount = 0
+	m.textInputCount = 0
 	m.testError = ""
 	return nil
 }
@@ -396,6 +527,7 @@ func (m *appModel) requestNextTest() tea.Cmd {
 }
 func (m appModel) View() tea.View {
 	var b strings.Builder
+	var nativeCursor *tea.Cursor
 	if m.width == 0 {
 		m.width = 80
 	}
@@ -455,18 +587,53 @@ func (m appModel) View() tea.View {
 		}
 		p := m.session.prompt()
 		currentStart, currentEnd, nextStart, nextEnd := promptWordRanges(p, m.session.Cursor)
-		promptText := string(p)
-		clusters := uniseg.NewGraphemes(promptText)
-		start := 0
+		headerRows := 2
+		if m.settings.ShowWPM && m.session.ActiveNS > 0 {
+			headerRows += 2
+		}
+		promptRows := m.height - headerRows - 3
+		visibleStart, visibleEnd, _, scrolled := promptViewport(m.session.promptText, m.session.Cursor, m.width, promptRows)
+		promptTop := headerRows
+		if scrolled && visibleStart > 0 {
+			b.WriteString("…\n")
+			promptTop++
+		}
+		clusters := uniseg.NewGraphemes(m.session.promptText)
+		start, line, column := 0, 0, 0
+		lastWasNewline := false
 		for clusters.Next() {
-			cluster := clusters.Bytes()
-			end := start + utf8.RuneCount(cluster)
-			if start <= m.session.Cursor && m.session.Cursor < end {
-				if m.settings.BlockCursor {
-					b.WriteRune('█')
-				} else {
-					b.WriteRune('▏')
+			cluster := clusters.Str()
+			end := start + utf8.RuneCountInString(cluster)
+			if end <= visibleStart {
+				start = end
+				continue
+			}
+			if start >= visibleEnd {
+				break
+			}
+			cursorHere := start <= m.session.Cursor && m.session.Cursor < end
+			if cluster == "\n" {
+				if cursorHere {
+					nativeCursor = appCursor(column, promptTop+line, m.settings.BlockCursor)
 				}
+				b.WriteByte('\n')
+				line++
+				column = 0
+				lastWasNewline = true
+				start = end
+				continue
+			}
+			clusterWidth := uniseg.StringWidth(cluster)
+			if column > 0 && column+clusterWidth > m.width {
+				b.WriteByte('\n')
+				line++
+				column = 0
+				lastWasNewline = true
+			} else {
+				lastWasNewline = false
+			}
+			if cursorHere {
+				nativeCursor = appCursor(column, promptTop+line, m.settings.BlockCursor)
 			}
 			var style lipgloss.Style
 			hasStyle := false
@@ -503,23 +670,27 @@ func (m appModel) View() tea.View {
 				}
 			}
 			if hasStyle {
-				b.WriteString(style.Render(string(cluster)))
+				b.WriteString(style.Render(cluster))
 			} else {
-				b.Write(cluster)
+				b.WriteString(cluster)
 			}
+			column += clusterWidth
 			start = end
 		}
-		if start == m.session.Cursor {
-			if m.settings.BlockCursor {
-				b.WriteRune('█')
-			} else {
-				b.WriteRune('▏')
+		if m.session.Cursor == len(p) && m.session.Cursor >= visibleStart && m.session.Cursor <= visibleEnd {
+			nativeCursor = appCursor(column, promptTop+line, m.settings.BlockCursor)
+		}
+		if scrolled && visibleEnd < len(p) {
+			if !lastWasNewline {
+				b.WriteByte('\n')
 			}
+			b.WriteRune('…')
 		}
 		fmt.Fprintf(&b, "\n\nActive %.1fs · Space skip · Ctrl-P settings · Esc restart", float64(m.session.ActiveNS)/1e9)
 	}
 	v := tea.NewView(lipgloss.NewStyle().Foreground(lipgloss.Color("#fafafa")).Background(lipgloss.Color("#1a1a1a")).Render(b.String()))
 	v.AltScreen = true
+	v.Cursor = nativeCursor
 	return v
 }
 
