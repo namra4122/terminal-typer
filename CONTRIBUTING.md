@@ -4,7 +4,7 @@ Read [AGENTS.md](AGENTS.md) before changing the repository. It defines compatibi
 
 ## Local workflow
 
-1. Install Go 1.17 or newer and run `go mod download`.
+1. Install Go 1.26.0 or newer and run `go mod download`.
 2. Run `make build` to create `bin/tt`.
 3. Run `make verify` and `make smoke` before opening a change.
 

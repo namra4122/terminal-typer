@@ -1,6 +1,6 @@
 package main
 
-import "regexp"
+import "strings"
 
 func generateWordTest(name string, n int, g int) func() []segment {
 	var b []byte
@@ -9,7 +9,7 @@ func generateWordTest(name string, n int, g int) func() []segment {
 		die("%s does not appear to be a valid word list. See '-list words' for a list of builtin word lists.", name)
 	}
 
-	words := regexp.MustCompile("\\s+").Split(string(b), -1)
+	words := strings.Fields(string(b))
 
 	return func() []segment {
 		segments := make([]segment, g)

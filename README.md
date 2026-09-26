@@ -20,7 +20,7 @@ The [plan index](.agents/plans/README.md) labels implemented records, design ref
 
 ## Build from source
 
-Go 1.17 or newer is required. From this checkout:
+Go 1.26.0 or newer is required. The opt-in contributor renderer also uses Bubble Tea v2 and Lip Gloss v2; the default renderer remains the existing `tcell` implementation.
 
 ```sh
 go mod download
@@ -29,6 +29,8 @@ make build
 ```
 
 `make install` installs the binary and manual under `/usr/local`; override `PREFIX` or `DESTDIR` as needed. Installing the manual requires Pandoc and gzip. Contributors should run `make verify` and `make smoke`; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+For the opt-in Charm typing screen, run `TT_UI=charm ./bin/tt -n 10 -g 2` from an interactive terminal. This route supports terminal word tests and the `-n`, `-g`, `-t`, and six live-setting overrides; other invocations continue through the existing renderer.
 
 ## Prebuilt 0.4.2 release
 

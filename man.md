@@ -26,6 +26,10 @@ usage: tt \[OPTION\]... \[FILE\]
   test. Each paragraph of the input is treated as a segment unless '-multi' is
   supplied in which case each paragraph is treated as a separate test. 
 
+  Source builds require Go 1.26.0 or newer. The contributor-only Charm renderer
+  can be selected with **TT_UI=charm** for terminal word tests; unsupported
+  invocations continue through the existing renderer.
+
 # OPTIONS
 
 ## Modes

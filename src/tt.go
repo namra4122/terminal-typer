@@ -552,6 +552,18 @@ func main() {
 		stdinData = b
 	}
 	testFn := newTestGenerator(config, stdinData)
+	if os.Getenv("TT_UI") == "charm" && charmInvocationSupported(config, visitedFlags) {
+		generated := testFn()
+		if generated == nil {
+			exit(0)
+		}
+		_, rc, runErr := RunCharm(generated, savedSettings, overrides, liveFlags)
+		if runErr != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %s\n", runErr)
+			os.Exit(1)
+		}
+		os.Exit(rc)
+	}
 
 	scr, err = tcell.NewScreen()
 	if err != nil {
@@ -653,4 +665,17 @@ func main() {
 			//TODO: implement state-preserving resize (maybe)
 		}
 	}
+}
+func charmInvocationSupported(config TestConfig, visited map[string]bool) bool {
+	if !isatty.IsTerminal(os.Stdin.Fd()) || config.Source != wordSource {
+		return false
+	}
+	for name := range visited {
+		switch name {
+		case "n", "g", "t", "showwpm", "noskip", "nobackspace", "blockcursor", "bold", "nohighlight", "highlight1", "highlight2":
+		default:
+			return false
+		}
+	}
+	return true
 }
