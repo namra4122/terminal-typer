@@ -118,6 +118,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		key := v.String()
 		now := sessionNow()
+		_ = m.session.Apply(SessionInput{Kind: InputTick, AtNS: now})
 		m.expireIfNeeded(now)
 		if m.generating || m.tooSmall || m.savingSettings {
 			if key == "ctrl+c" {

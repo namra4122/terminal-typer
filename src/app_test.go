@@ -45,6 +45,17 @@ func TestCharmExpiryClampsLateInputAtTimeLimit(t *testing.T) {
 	}
 }
 
+func TestCharmSettlesTimedSessionBeforeLateKey(t *testing.T) {
+	session := testSession("alpha")
+	session.State = SessionRunning
+	model := appModel{session: session, settings: defaultRuntimeSettings(), timeLimit: time.Nanosecond}
+	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Text: "a", Code: 'a'}))
+	model = updated.(appModel)
+	if model.session.State != SessionExpired || model.session.ActiveNS != int64(time.Nanosecond) || model.session.Typed[0] != 0 {
+		t.Fatalf("late key was accepted after expiry: state=%s active=%d typed=%q", model.session.State, model.session.ActiveNS, string(model.session.Typed))
+	}
+}
+
 func TestCharmGuardsResultActionsFor200Milliseconds(t *testing.T) {
 	session := testSession("a")
 	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: sessionNow()}); err != nil {
