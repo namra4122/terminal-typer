@@ -429,7 +429,6 @@ func main() {
 	var errorSoundFile string
 
 	var err error
-	var testFn func() []segment
 
 	flag.IntVar(&n, "n", 50, "")
 	flag.IntVar(&g, "g", 1, "")
@@ -528,24 +527,31 @@ func main() {
 			"\n", " \n", -1)
 	}
 
-	switch {
-	case wordFile != "":
-		testFn = generateWordTest(wordFile, n, g)
-	case quoteFile != "":
-		testFn = generateQuoteTest(quoteFile)
-	case !isatty.IsTerminal(os.Stdin.Fd()):
+	inputFile := ""
+	if len(flag.Args()) > 0 {
+		inputFile = flag.Args()[0]
+	}
+	config := resolveTestConfig(testOptions{
+		Words:           wordFile,
+		Quotes:          quoteFile,
+		File:            inputFile,
+		StdinIsTerminal: isatty.IsTerminal(os.Stdin.Fd()),
+		WordsPerGroup:   n,
+		Groups:          g,
+		TimeoutSeconds:  timeout,
+		Raw:             rawMode,
+		Multi:           multiMode,
+		StartParagraph:  startParagraph,
+	})
+	var stdinData []byte
+	if config.Source == stdinSource {
 		b, err := ioutil.ReadAll(os.Stdin)
 		if err != nil {
 			panic(err)
 		}
-
-		testFn = generateTestFromData(b, rawMode, multiMode)
-	case len(flag.Args()) > 0:
-		path := flag.Args()[0]
-		testFn = generateTestFromFile(path, startParagraph)
-	default:
-		testFn = generateWordTest("1000en", n, g)
+		stdinData = b
 	}
+	testFn := newTestGenerator(config, stdinData)
 
 	scr, err = tcell.NewScreen()
 	if err != nil {
@@ -601,11 +607,7 @@ func main() {
 		typer.errorSoundBuffer = errorBuf
 	}
 
-	if timeout != -1 {
-		timeout *= 1e9
-	}
-
-	var tests [][]segment
+	var tests []*Test
 	var idx = 0
 
 	for {
@@ -617,13 +619,7 @@ func main() {
 			exit(0)
 		}
 
-		if !rawMode {
-			for i, _ := range tests[idx] {
-				tests[idx][i].Text = reflow(tests[idx][i].Text)
-			}
-		}
-
-		nerrs, ncorrect, t, rc, mistakes := typer.Start(tests[idx], time.Duration(timeout))
+		nerrs, ncorrect, t, rc, mistakes := typer.Start(displaySegments(tests[idx], reflow), config.TimeLimit)
 		saveMistakes(mistakes)
 
 		switch rc {
@@ -640,11 +636,7 @@ func main() {
 
 			results = append(results, result{wpm, cpm, accuracy, time.Now().Unix(), mistakes})
 			if !noReport {
-				attribution := ""
-				if len(tests[idx]) == 1 {
-					attribution = tests[idx][0].Attribution
-				}
-				showReport(scr, cpm, wpm, accuracy, attribution, mistakes, typer.styles)
+				showReport(scr, cpm, wpm, accuracy, tests[idx].Attribution, mistakes, typer.styles)
 			}
 			if oneShotMode {
 				exit(0)
