@@ -29,6 +29,23 @@ func TestCharmKeepsGraphemeClusterTogetherAtScalarCursor(t *testing.T) {
 	}
 }
 
+func TestCharmViewSetsTerminalWideColors(t *testing.T) {
+	model := appModel{
+		session:  testSession("alpha beta"),
+		settings: defaultRuntimeSettings(),
+		width:    80,
+		height:   24,
+	}
+
+	view := model.View()
+	if view.ForegroundColor != charmForegroundColor {
+		t.Fatalf("terminal foreground = %v; want %v", view.ForegroundColor, charmForegroundColor)
+	}
+	if view.BackgroundColor != charmBackgroundColor {
+		t.Fatalf("terminal background = %v; want %v", view.BackgroundColor, charmBackgroundColor)
+	}
+}
+
 func TestCharmExpiryClampsLateInputAtTimeLimit(t *testing.T) {
 	session := testSession("alpha")
 	model := appModel{

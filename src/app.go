@@ -14,10 +14,13 @@ import (
 )
 
 var (
-	errorTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff8080")).Underline(true)
-	boldTypedStyle   = lipgloss.NewStyle().Bold(true)
-	currentWordStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f35815"))
-	nextWordStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a3a3a3"))
+	charmForegroundColor = lipgloss.Color("#fafafa")
+	charmBackgroundColor = lipgloss.Color("#1a1a1a")
+	charmViewStyle       = lipgloss.NewStyle().Foreground(charmForegroundColor).Background(charmBackgroundColor)
+	errorTextStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff8080")).Underline(true)
+	boldTypedStyle       = lipgloss.NewStyle().Bold(true)
+	currentWordStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#f35815"))
+	nextWordStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#a3a3a3"))
 )
 
 type testEntry struct {
@@ -286,6 +289,7 @@ func (m *appModel) refreshMeaningful() {
 		m.meaningful = true
 	}
 }
+
 func (m *appModel) expireIfNeeded(now int64) {
 	if m.timeLimit >= 0 && m.session.State == SessionRunning && m.session.ActiveNS >= int64(m.timeLimit) {
 		m.session.ActiveNS = int64(m.timeLimit)
@@ -502,6 +506,7 @@ func (m *appModel) restartCurrentAttempt() error {
 	m.testError = ""
 	return nil
 }
+
 func (m *appModel) requestNextTest() tea.Cmd {
 	if m.testIndex+1 < len(m.tests) {
 		m.testIndex++
@@ -532,6 +537,7 @@ func (m *appModel) requestNextTest() tea.Cmd {
 		return testReadyMsg{test: test, attemptID: attemptID, promptID: promptID}
 	}
 }
+
 func (m appModel) View() tea.View {
 	var b strings.Builder
 	var nativeCursor *tea.Cursor
@@ -718,7 +724,9 @@ func (m appModel) View() tea.View {
 		}
 		fmt.Fprintf(&b, "\n\nActive %.1fs · Space skip · Ctrl-P settings · Esc restart", float64(m.session.ActiveNS)/1e9)
 	}
-	v := tea.NewView(lipgloss.NewStyle().Foreground(lipgloss.Color("#fafafa")).Background(lipgloss.Color("#1a1a1a")).Render(b.String()))
+	v := tea.NewView(charmViewStyle.Render(b.String()))
+	v.ForegroundColor = charmForegroundColor
+	v.BackgroundColor = charmBackgroundColor
 	v.AltScreen = true
 	v.Cursor = nativeCursor
 	return v
