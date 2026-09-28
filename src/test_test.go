@@ -88,7 +88,7 @@ func TestQuoteAndFileGeneratorsCarrySourceMetadata(t *testing.T) {
 	quoteConfig := resolveTestConfig(testOptions{Quotes: "en", TimeoutSeconds: -1})
 	quote := newTestGenerator(quoteConfig, nil)()
 	if quote == nil || quote.SourceID != "quotes:en" || len(quote.Segments) != 1 ||
-		quote.Attribution != quote.Segments[0].Attribution {
+		quote.Attribution != quote.Segments[0].Attribution || quote.Origin.Kind != "private-quote" || quote.Origin.Embedded {
 		t.Fatalf("quote metadata = %#v", quote)
 	}
 
@@ -105,5 +105,43 @@ func TestQuoteAndFileGeneratorsCarrySourceMetadata(t *testing.T) {
 	if first == nil || second == nil || done != nil || first.SourceID != "file:"+path ||
 		first.Segments[0].Text != "first" || second.Segments[0].Text != "second" {
 		t.Fatalf("file sequence = %#v, %#v, %#v", first, second, done)
+	}
+}
+
+func TestResolveResourceReturnsWinningOrigin(t *testing.T) {
+	explicit := filepath.Join(t.TempDir(), "private-words")
+	if err := os.WriteFile(explicit, []byte("secret alpha"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	data, origin, err := ResolveResource("words", explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "secret alpha" || origin.Kind != "private-word" || origin.Path != explicit || origin.Embedded {
+		t.Fatalf("explicit resource = %q, %#v", data, origin)
+	}
+
+	data, origin, err = ResolveResource("words", "1000en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 || origin.Kind != "embedded-word" || origin.PackID != "1000en" ||
+		origin.Revision == "" || origin.Path != "" || !origin.Embedded {
+		t.Fatalf("embedded resource = %d bytes, %#v", len(data), origin)
+	}
+}
+
+func TestGeneratedWordTestCarriesActualOrigin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "words")
+	if err := os.WriteFile(path, []byte("alpha beta gamma"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := resolveTestConfig(testOptions{
+		Words: path, StdinIsTerminal: true, WordsPerGroup: 2, Groups: 1, TimeoutSeconds: -1,
+	})
+	generated := newTestGenerator(cfg, nil)()
+	if generated == nil || generated.Origin.Kind != "private-word" || generated.Origin.Path != path ||
+		generated.Origin.Embedded {
+		t.Fatalf("generated origin = %#v", generated)
 	}
 }

@@ -1,6 +1,6 @@
 # Plan 003: Completed results survive restart
 
-Status: proposed implementation specification. No feature in this document is implemented by the act of writing it. Source: [PRD](../../PRD.md). Planning baseline: 2026-09-26 working tree, including existing uncommitted `src/test.go`, `src/test_test.go`, and `src/tt.go` changes. Reinspect those files before implementation and preserve unrelated work.
+Status: completed implementation record (2026-09-28). Source: [PRD](../../PRD.md). Implemented in `src/history.go`, `src/app.go`, source-origin plumbing, tests, README/manual, and generated manual output.
 
 ## Goal and user job
 
@@ -160,8 +160,8 @@ Release, deployment, publishing binaries, and uploading user data require separa
 
 ## Definition of done
 
-- [ ] AC-1: Finish two tests, restart the process, and find exactly two records in chronological History. Saving one ID twice produces one file and one row.
-- [ ] AC-2: A private stdin/file fixture containing a sentinel secret produces no sentinel, file path, or word fragment in any new store/index file; aggregates remain usable.
-- [ ] AC-3: Injected write/sync/rename failures leave previous committed files unchanged, keep Results visible, and show `not stored` with Retry save.
-- [ ] AC-4: Malformed or unknown-version records keep their bytes intact, make History unavailable with the exact affected path, and allow a fresh typing test without replacing the store.
-- [ ] AC-5: POSIX directories are 0700 and files 0600. Windows uses inherited user-profile access controls and is verified in plan 017. Existing `.db`/`.errors`/settings hashes are unchanged.
+- [x] AC-1: Finish two tests, restart the process, and find exactly two records in chronological History. Saving one ID twice produces one file and one row.
+- [x] AC-2: A private stdin/file fixture containing a sentinel secret produces no sentinel, file path, or word fragment in any new store/index file; aggregates remain usable.
+- [x] AC-3: Injected write/sync/rename failures leave previous committed files unchanged, keep Results visible, and show `not stored` with Retry save.
+- [x] AC-4: Malformed or unknown-version records keep their bytes intact, make History unavailable with the exact affected path, and allow a fresh typing test without replacing the store.
+- [x] AC-5: POSIX directories are 0700 and files 0600. Windows uses inherited user-profile access controls and is verified in plan 017. Existing `.db`/`.errors`/settings hashes are unchanged.

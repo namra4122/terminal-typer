@@ -93,6 +93,7 @@ func resolveTestConfig(o testOptions) TestConfig {
 type Test struct {
 	Config             TestConfig
 	SourceID           string
+	Origin             ResourceOrigin
 	Segments           []segment
 	Attribution        string
 	EligibleForHistory bool
@@ -101,16 +102,25 @@ type Test struct {
 
 func newTestGenerator(cfg TestConfig, stdinData []byte) func() *Test {
 	var generate func() []segment
+	var origin ResourceOrigin
 	sourceID := string(cfg.Source) + ":" + cfg.Pack
 	switch cfg.Source {
 	case wordSource:
-		generate = generateWordTest(cfg.Pack, cfg.WordsPerGroup, cfg.Groups)
+		data, resolved, err := ResolveResource("words", cfg.Pack)
+		if err != nil {
+			die("%s does not appear to be a valid word list. See '-list words' for a list of builtin word lists.", cfg.Pack)
+		}
+		origin = resolved
+		generate = generateWordTestFromBytes(data, cfg.WordsPerGroup, cfg.Groups)
 	case quoteSource:
+		origin = ResourceOrigin{Kind: "private-quote"}
 		generate = generateQuoteTest(cfg.Pack)
 	case stdinSource:
+		origin = ResourceOrigin{Kind: "stdin", Path: "-"}
 		generate = generateTestFromData(stdinData, cfg.Raw, cfg.Multi)
 		sourceID = "stdin"
 	case fileSource:
+		origin = ResourceOrigin{Kind: "file", Path: cfg.Pack}
 		generate = generateTestFromFile(cfg.Pack, cfg.StartParagraph)
 		path, err := filepath.Abs(cfg.Pack)
 		if err != nil {
@@ -127,6 +137,7 @@ func newTestGenerator(cfg TestConfig, stdinData []byte) func() *Test {
 		test := &Test{
 			Config:             cfg,
 			SourceID:           sourceID,
+			Origin:             origin,
 			Segments:           segments,
 			EligibleForHistory: true,
 			EligibleForPB:      true,

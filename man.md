@@ -32,10 +32,11 @@ usage: tt \[OPTION\]... \[FILE\]
 
   On the Charm route, completed tests show effective/raw WPM, CPM, input
   accuracy, consistency, error totals, active and paused time, configuration,
-  eligibility, and available source/retry details. Zero-duration speeds are
-  unavailable; short samples are labeled. Results are in-memory; the existing
-  process-exit JSON/CSV schemas are unchanged. Consistency uses active-time
-  interval raw-WPM rates, which can differ from final retained-character speeds.
+  eligibility, available source/retry details, and local save status. Zero-
+  duration speeds are unavailable; short samples are labeled. Results are
+  written asynchronously to durable local History; the existing process-exit
+  JSON/CSV schemas are unchanged. Consistency uses active-time interval raw-WPM
+  rates, which can differ from final retained-character speeds.
 
 
 # OPTIONS
@@ -237,6 +238,17 @@ Modify to taste.
   **-highlight2** flags override matching saved values for the current
   invocation without rewriting them.
 
+  Rich Charm History is retained indefinitely in
+  **$XDG_DATA_HOME/tt/history-v1**, or
+  **~/.local/share/tt/history-v1** when **$XDG_DATA_HOME** is unset. Each
+  authoritative session is a versioned JSON file; **index.json** is a
+  rebuildable cache. Embedded prompts may retain bounded mistake fragments.
+  Local word lists, files, stdin, complete prompts, complete typed responses,
+  raw input events, and source paths are not retained in rich History.
+  Malformed authoritative data is reported with its exact path and is not
+  rewritten. If **.write-lock** remains after a crash, verify no tt writer is
+  active before removing only that lock directory.
+
 # KEYS
 
   **esc: ** Restarts the test; on the Results screen retries the same prompt.\
@@ -246,6 +258,10 @@ Modify to taste.
   **esc** or **C-p** saves and returns to the same test.\
   **C-backspace: ** Deletes the previous word\
   **r: ** Retries the completed prompt from the Results screen.\
+  **s: ** Retries a failed History save from the Results screen.\
+  **h: ** Opens History from Results. In History, **up**/**down** select,
+  **left**/**right** page, **t** toggles regular/practice, and **esc** returns
+  to the same result.\
   **enter: ** Starts the next test from the Results screen.\
   **right** Move to the next test.\
   **left** Move to the previous test.

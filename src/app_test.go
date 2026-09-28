@@ -418,3 +418,170 @@ func TestCharmLabelsShortSampleAndWaitsForOneSecondLiveSpeed(t *testing.T) {
 		t.Fatalf("short final sample was not labeled: %q", view)
 	}
 }
+
+func historyAppModel(t *testing.T, root string) appModel {
+	t.Helper()
+	test := &Test{
+		Config: TestConfig{
+			Mode: wordMode, Source: wordSource, Pack: "1000en", TimeLimit: -1,
+			WordCount: 1, WordsPerGroup: 1, Groups: 1,
+		},
+		Origin:             ResourceOrigin{Kind: "embedded-word", PackID: "1000en", Revision: strings.Repeat("f", 64), Embedded: true},
+		Segments:           []segment{{Text: "a"}},
+		EligibleForHistory: true,
+		EligibleForPB:      true,
+	}
+	session := NewSession(test, strings.Repeat("1", 32), strings.Repeat("2", 32))
+	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	return appModel{
+		session: session, settings: defaultRuntimeSettings(), saved: defaultRuntimeSettings(),
+		timeLimit: -1, historyRoot: root,
+		tests:        []*testEntry{{test: test, promptID: session.PromptID}},
+		attempts:     map[string]string{session.PromptID: session.AttemptID},
+		generateTest: func() *Test { return test },
+	}
+}
+
+func TestCharmCompletionSavesAndBrowsesDurableHistory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "history-v1")
+	model := historyAppModel(t, root)
+	cmd := model.markResultReady(2)
+	if cmd == nil || model.saveState != SavePending || !strings.Contains(model.View().Content, "Saving") {
+		t.Fatalf("completion save state = %q, view=%q", model.saveState, model.View().Content)
+	}
+	value, _ := model.Update(cmd())
+	model = value.(appModel)
+	if model.saveState != SaveSaved || !strings.Contains(model.View().Content, "Saved") {
+		t.Fatalf("saved state = %q, view=%q", model.saveState, model.View().Content)
+	}
+	model.resultReadyAtNS = sessionNow() - int64(time.Second)
+	value, cmd = model.Update(tea.KeyPressMsg(tea.Key{Text: "h", Code: 'h'}))
+	model = value.(appModel)
+	if cmd == nil || !model.historyOpen || !model.historyLoading {
+		t.Fatalf("history did not open: %#v", model)
+	}
+	value, _ = model.Update(cmd())
+	model = value.(appModel)
+	if model.historyLoading || model.historyPage.Total != 1 || !strings.Contains(model.View().Content, "History · Regular") {
+		t.Fatalf("history view = %#v, %q", model.historyPage, model.View().Content)
+	}
+	resultID := model.result.ID
+	value, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	model = value.(appModel)
+	if model.historyOpen || model.result == nil || model.result.ID != resultID || model.session.State != SessionCompleted {
+		t.Fatalf("Escape did not return to the same result: %#v", model)
+	}
+}
+
+func TestCharmFailedSaveKeepsResultAndRetriesSameID(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocked, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := historyAppModel(t, filepath.Join(blocked, "history-v1"))
+	cmd := model.markResultReady(2)
+	resultID := model.result.ID
+	value, _ := model.Update(cmd())
+	model = value.(appModel)
+	if model.saveState != SaveFailed || model.result == nil || model.result.ID != resultID ||
+		!strings.Contains(model.View().Content, "not stored") || !strings.Contains(model.View().Content, "Retry save") {
+		t.Fatalf("failed save state = %#v, %q", model, model.View().Content)
+	}
+	model.resultReadyAtNS = sessionNow() - int64(time.Second)
+	model.historyRoot = filepath.Join(t.TempDir(), "history-v1")
+	value, retry := model.Update(tea.KeyPressMsg(tea.Key{Text: "s", Code: 's'}))
+	model = value.(appModel)
+	if retry == nil || model.saveState != SavePending || model.historyRecord.ID != resultID {
+		t.Fatalf("retry changed result identity: state=%q record=%#v", model.saveState, model.historyRecord)
+	}
+	value, _ = model.Update(retry())
+	model = value.(appModel)
+	if model.saveState != SaveSaved {
+		t.Fatalf("retry state = %q error=%q", model.saveState, model.saveError)
+	}
+}
+
+func TestCharmHistoryErrorNamesPathAndDoesNotBlockNextTest(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "history-v1")
+	model := historyAppModel(t, root)
+	if err := SaveHistory(root, ProjectHistory(*func() *SessionResult {
+		model.markResultReady(2)
+		return model.result
+	}(), model.session.Test.Origin, PrivacyPolicy{})); err != nil {
+		t.Fatal(err)
+	}
+	badPath := filepath.Join(root, "sessions", strings.Repeat("3", 32)+".json")
+	if err := os.WriteFile(badPath, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model.resultReadyAtNS = sessionNow() - int64(time.Second)
+	value, load := model.Update(tea.KeyPressMsg(tea.Key{Text: "h", Code: 'h'}))
+	model = value.(appModel)
+	value, _ = model.Update(load())
+	model = value.(appModel)
+	if !strings.Contains(model.View().Content, badPath) {
+		t.Fatalf("history error did not identify path: %q", model.View().Content)
+	}
+	value, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	model = value.(appModel)
+	value, next := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = value.(appModel)
+	if next == nil || !model.generating {
+		t.Fatalf("history failure blocked a fresh test: %#v", model)
+	}
+}
+
+func TestCharmIgnoresStaleHistorySaveMessage(t *testing.T) {
+	model := historyAppModel(t, t.TempDir())
+	model.markResultReady(2)
+	model.saveState = SavePending
+	value, _ := model.Update(historySavedMsg{id: strings.Repeat("9", 32)})
+	model = value.(appModel)
+	if model.saveState != SavePending {
+		t.Fatalf("stale save changed state to %q", model.saveState)
+	}
+}
+
+func TestCharmTracksPendingSaveAcrossNextTest(t *testing.T) {
+	model := historyAppModel(t, filepath.Join(t.TempDir(), "history-v1"))
+	save := model.markResultReady(2)
+	resultID := model.historyRecord.ID
+	model.resultReadyAtNS = sessionNow() - int64(time.Second)
+	value, next := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = value.(appModel)
+	value, _ = model.Update(next())
+	model = value.(appModel)
+	if _, pending := model.pendingHistory[resultID]; !pending || model.result != nil {
+		t.Fatalf("next test discarded pending result: pending=%#v result=%#v", model.pendingHistory, model.result)
+	}
+	value, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+	model = value.(appModel)
+	if model.quitting || !model.exitRequested {
+		t.Fatalf("quit did not wait for pending save: quitting=%v requested=%v", model.quitting, model.exitRequested)
+	}
+	value, _ = model.Update(save())
+	model = value.(appModel)
+	if !model.quitting || len(model.pendingHistory) != 0 {
+		t.Fatalf("completed pending save did not finish exit: quitting=%v pending=%#v", model.quitting, model.pendingHistory)
+	}
+}
+
+func TestCharmIgnoresStaleHistoryLoadRequest(t *testing.T) {
+	model := historyAppModel(t, t.TempDir())
+	model.historyOpen = true
+	model.historyLoading = true
+	model.historyRequestID = 2
+	model.historyPage = HistoryPage{Total: 1}
+	value, _ := model.Update(historyLoadedMsg{requestID: 1, page: HistoryPage{Total: 99}})
+	model = value.(appModel)
+	if !model.historyLoading || model.historyPage.Total != 1 {
+		t.Fatalf("stale load replaced current page: loading=%v page=%#v", model.historyLoading, model.historyPage)
+	}
+	value, _ = model.Update(historyLoadedMsg{requestID: 2, page: HistoryPage{Total: 2}})
+	model = value.(appModel)
+	if model.historyLoading || model.historyPage.Total != 2 {
+		t.Fatalf("current load was ignored: loading=%v page=%#v", model.historyLoading, model.historyPage)
+	}
+}

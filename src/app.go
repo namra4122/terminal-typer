@@ -37,6 +37,18 @@ type settingsSavedMsg struct {
 	settings runtimeSettings
 	err      error
 }
+type historySavedMsg struct {
+	id  string
+	err error
+}
+type historyLoadedMsg struct {
+	requestID uint64
+	practice  bool
+	offset    int
+	page      HistoryPage
+	err       error
+}
+type historyExitTimeoutMsg struct{}
 type appModel struct {
 	session             *Session
 	width, height       int
@@ -65,6 +77,21 @@ type appModel struct {
 	savingSettings      bool
 	resultReadyAtNS     int64
 	result              *SessionResult
+	historyRoot         string
+	historyRecord       HistoryRecord
+	saveState           SaveState
+	saveError           string
+	historyOpen         bool
+	historyLoading      bool
+	historyPractice     bool
+	historyOffset       int
+	historySelected     int
+	historyPage         HistoryPage
+	historyError        string
+	exitRequested       bool
+	historyRequestID    uint64
+	pendingHistory      map[string]HistoryRecord
+	backgroundSaveError string
 }
 type appTick time.Time
 
@@ -74,6 +101,54 @@ func tickCmd() tea.Cmd {
 func (m appModel) Init() tea.Cmd { return tickCmd() }
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
+	case historySavedMsg:
+		delete(m.pendingHistory, v.id)
+		latest := v.id == m.historyRecord.ID
+		if v.err != nil {
+			if latest {
+				m.saveState = SaveFailed
+				m.saveError = v.err.Error()
+			} else {
+				m.backgroundSaveError = v.err.Error()
+			}
+		} else if latest {
+			m.saveState = SaveSaved
+			m.saveError = ""
+		}
+		if v.err == nil && len(m.pendingHistory) == 0 && m.backgroundSaveError == "save still pending" {
+			m.backgroundSaveError = ""
+		}
+		if m.exitRequested && len(m.pendingHistory) == 0 {
+			if m.backgroundSaveError == "" && m.saveState != SaveFailed {
+				m.quitting = true
+				return m, tea.Quit
+			}
+			m.exitRequested = false
+		}
+		return m, nil
+	case historyLoadedMsg:
+		if !m.historyOpen || v.requestID != m.historyRequestID {
+			return m, nil
+		}
+		m.historyLoading = false
+		m.historyPage = v.page
+		m.historySelected = 0
+		if v.err != nil {
+			m.historyError = v.err.Error()
+		} else {
+			m.historyError = ""
+		}
+		return m, nil
+	case historyExitTimeoutMsg:
+		if len(m.pendingHistory) > 0 {
+			if _, currentPending := m.pendingHistory[m.historyRecord.ID]; currentPending {
+				m.saveState = SaveFailed
+				m.saveError = "save still pending"
+			}
+			m.backgroundSaveError = "save still pending"
+			m.exitRequested = false
+		}
+		return m, nil
 	case settingsSavedMsg:
 		m.savingSettings = false
 		if v.err != nil {
@@ -119,20 +194,55 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restartPending = false
 			m.session.RestartUntilNS = 0
 		}
-		m.expireIfNeeded(now)
-		return m, tickCmd()
+		saveCmd := m.expireIfNeeded(now)
+		return m, tea.Batch(tickCmd(), saveCmd)
 	case tea.KeyPressMsg:
 		key := v.String()
 		now := sessionNow()
 		_ = m.session.Apply(SessionInput{Kind: InputTick, AtNS: now})
-		m.expireIfNeeded(now)
+		saveCmd := m.expireIfNeeded(now)
+		if saveCmd != nil {
+			return m, saveCmd
+		}
 		if m.generating || m.tooSmall || m.savingSettings {
 			if key == "ctrl+c" {
-				m.quitting = true
-				return m, tea.Quit
+				return m, m.requestQuit()
 			}
 			if key == "ctrl+l" {
 				return m, nil
+			}
+			return m, nil
+		}
+		if m.historyOpen {
+			switch key {
+			case "ctrl+c":
+				return m, m.requestQuit()
+			case "esc", "escape":
+				m.historyOpen = false
+				m.historyError = ""
+				return m, nil
+			case "up":
+				if m.historySelected > 0 {
+					m.historySelected--
+				}
+			case "down":
+				if m.historySelected+1 < len(m.historyPage.Records) {
+					m.historySelected++
+				}
+			case "t":
+				m.historyPractice = !m.historyPractice
+				m.historyOffset = 0
+				return m, m.loadHistory()
+			case "left":
+				if m.historyOffset >= 25 {
+					m.historyOffset -= 25
+					return m, m.loadHistory()
+				}
+			case "right":
+				if m.historyOffset+len(m.historyPage.Records) < m.historyPage.Total {
+					m.historyOffset += 25
+					return m, m.loadHistory()
+				}
 			}
 			return m, nil
 		}
@@ -141,8 +251,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch key {
 		case "ctrl+c":
-			m.quitting = true
-			return m, tea.Quit
+			return m, m.requestQuit()
 		case "ctrl+l":
 			return m, nil
 		case "ctrl+p":
@@ -225,6 +334,21 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.requestNextTest()
 			}
 			return m, nil
+		case "h":
+			if !m.settingsOpen && (m.session.State == SessionCompleted || m.session.State == SessionExpired) {
+				m.historyOpen = true
+				m.historyPractice = false
+				m.historyOffset = 0
+				m.historySelected = 0
+				return m, m.loadHistory()
+			}
+		case "s":
+			_, stillPending := m.pendingHistory[m.historyRecord.ID]
+			if !m.settingsOpen && !stillPending && (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.saveState == SaveFailed {
+				m.saveState = SavePending
+				m.saveError = ""
+				return m, m.saveHistory()
+			}
 		case "r":
 			if !m.settingsOpen && (m.session.State == SessionCompleted || m.session.State == SessionExpired) {
 				if err := m.restartCurrentAttempt(); err != nil {
@@ -245,8 +369,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.session.Apply(SessionInput{Kind: InputText, Text: " ", AtNS: now})
 				m.refreshMeaningful()
 			}
-			m.markResultReady(now)
-			return m, nil
+			return m, m.markResultReady(now)
 		case "backspace", "ctrl+backspace", "ctrl+w":
 			if m.settingsOpen || !m.settings.AllowBackspace {
 				return m, nil
@@ -271,8 +394,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshMeaningful()
 			}
 		}
-		m.markResultReady(now)
-		return m, nil
+		return m, m.markResultReady(now)
 	}
 	return m, nil
 }
@@ -290,24 +412,32 @@ func (m *appModel) refreshMeaningful() {
 	}
 }
 
-func (m *appModel) expireIfNeeded(now int64) {
+func (m *appModel) expireIfNeeded(now int64) tea.Cmd {
 	if m.timeLimit >= 0 && m.session.State == SessionRunning && m.session.ActiveNS >= int64(m.timeLimit) {
 		m.session.ActiveNS = int64(m.timeLimit)
 		m.session.State = SessionExpired
-		m.markResultReady(now)
+		return m.markResultReady(now)
 	}
+	return nil
 }
 
-func (m *appModel) markResultReady(now int64) {
+func (m *appModel) markResultReady(now int64) tea.Cmd {
 	if (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.result == nil && m.resultReadyAtNS == 0 {
 		m.resultReadyAtNS = now
 		result, err := FinishResult(m.session.Snapshot(), time.Now().UTC().UnixMilli())
 		if err == nil {
 			m.result = &result
+			if m.historyRoot != "" && m.session.Test != nil && m.session.Test.EligibleForHistory {
+				m.historyRecord = ProjectHistory(result, m.session.Test.Origin, PrivacyPolicy{})
+				m.saveState = SavePending
+				m.saveError = ""
+				return m.saveHistory()
+			}
 		} else {
 			m.testError = err.Error()
 		}
 	}
+	return nil
 }
 
 func appCursor(x, y int, block bool) *tea.Cursor {
@@ -480,6 +610,13 @@ func (m *appModel) activateTest(attemptID string) error {
 	m.resultReadyAtNS = 0
 	m.result = nil
 	m.testError = ""
+	m.historyOpen = false
+	m.historyLoading = false
+	m.historyPage = HistoryPage{}
+	m.historyError = ""
+	m.historyRecord = HistoryRecord{}
+	m.saveState = ""
+	m.saveError = ""
 	return nil
 }
 
@@ -504,6 +641,13 @@ func (m *appModel) restartCurrentAttempt() error {
 	m.processedEventCount = 0
 	m.textInputCount = 0
 	m.testError = ""
+	m.historyOpen = false
+	m.historyLoading = false
+	m.historyPage = HistoryPage{}
+	m.historyError = ""
+	m.historyRecord = HistoryRecord{}
+	m.saveState = ""
+	m.saveError = ""
 	return nil
 }
 
@@ -576,6 +720,40 @@ func (m appModel) View() tea.View {
 			b.WriteString(m.message)
 			b.WriteString("\nd discard changes · Ctrl-P/Escape retry save")
 		}
+	} else if m.historyOpen {
+		mode := "Regular"
+		if m.historyPractice {
+			mode = "Practice"
+		}
+		fmt.Fprintf(&b, "History · %s · %d results\n\n", mode, m.historyPage.Total)
+		if m.historyPage.Rebuilt && !m.historyLoading && m.historyError == "" {
+			b.WriteString("History index refreshed.\n\n")
+		}
+		switch {
+		case m.historyLoading:
+			b.WriteString("Loading history…")
+		case m.historyError != "":
+			fmt.Fprintf(&b, "History unavailable: %s\n\nThe store was not changed. Verify no tt writer is active before removing a reported lock.", m.historyError)
+		case len(m.historyPage.Records) == 0:
+			b.WriteString("No completed tests in this history.")
+		default:
+			for i, record := range m.historyPage.Records {
+				marker := "  "
+				if i == m.historySelected {
+					marker = "> "
+				}
+				fmt.Fprintf(&b, "%s%s  %-8s  WPM %s  Accuracy %s\n", marker,
+					time.UnixMilli(record.FinishedUnixMS).UTC().Format("2006-01-02 15:04"),
+					record.Mode, metricDisplay(record.Measurements.WPM, ""), metricDisplay(record.Measurements.Accuracy, "%"))
+			}
+			if m.historySelected >= 0 && m.historySelected < len(m.historyPage.Records) {
+				selected := m.historyPage.Records[m.historySelected]
+				fmt.Fprintf(&b, "\nSelected · %s · %s · %d errors · %.2fs active",
+					selected.Outcome, selected.SourceLabel, selected.Measurements.Errors.Total,
+					float64(selected.Measurements.ActiveMS)/1000)
+			}
+		}
+		b.WriteString("\n\nUp/Down select · Left/Right page · t regular/practice · Escape results")
 	} else if m.session.State == SessionCompleted || m.session.State == SessionExpired {
 		result := m.result
 		if result == nil {
@@ -612,7 +790,15 @@ func (m appModel) View() tea.View {
 			if result.RetryOf != "" {
 				b.WriteString("\nRetry          practice · PB-ineligible")
 			}
-			fmt.Fprintf(&b, "\n\nEnter: Next · r: Retry · Ctrl-C: quit")
+			switch m.saveState {
+			case SavePending:
+				b.WriteString("\nStorage       Saving")
+			case SaveSaved:
+				b.WriteString("\nStorage       Saved")
+			case SaveFailed:
+				fmt.Fprintf(&b, "\nStorage       not stored: %s · s: Retry save", m.saveError)
+			}
+			fmt.Fprintf(&b, "\n\nEnter: Next · r: Retry · h: History · Ctrl-C: quit")
 		}
 	} else {
 		cfg := m.session.Test.Config
@@ -732,6 +918,41 @@ func (m appModel) View() tea.View {
 	return v
 }
 
+func (m *appModel) saveHistory() tea.Cmd {
+	record, root := m.historyRecord, m.historyRoot
+	if m.pendingHistory == nil {
+		m.pendingHistory = make(map[string]HistoryRecord)
+	}
+	m.pendingHistory[record.ID] = record
+	return func() tea.Msg {
+		return historySavedMsg{id: record.ID, err: SaveHistory(root, record)}
+	}
+}
+
+func (m *appModel) loadHistory() tea.Cmd {
+	root, practice, offset := m.historyRoot, m.historyPractice, m.historyOffset
+	m.historyRequestID++
+	requestID := m.historyRequestID
+	m.historyLoading = true
+	m.historyError = ""
+	return func() tea.Msg {
+		page, err := ReadHistory(root, HistoryQuery{Practice: practice, Offset: offset, Limit: 25})
+		return historyLoadedMsg{requestID: requestID, practice: practice, offset: offset, page: page, err: err}
+	}
+}
+
+func (m *appModel) requestQuit() tea.Cmd {
+	if len(m.pendingHistory) > 0 && !m.exitRequested {
+		m.exitRequested = true
+		return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return historyExitTimeoutMsg{} })
+	}
+	if len(m.pendingHistory) > 0 {
+		m.backgroundSaveError = "save still pending"
+	}
+	m.quitting = true
+	return tea.Quit
+}
+
 func (m *appModel) closeSettings(now int64) tea.Cmd {
 	if m.savingSettings {
 		return nil
@@ -792,6 +1013,7 @@ func RunCharm(test *Test, saved runtimeSettings, overrides settingsOverrides, fl
 		generateTest:  newTestGenerator(test.Config, nil),
 		attempts:      map[string]string{prompt: attempt},
 	}
+	m.historyRoot = HistoryRoot()
 	m.session.AllowBackspace = m.settings.AllowBackspace
 	m.session.SkipWord = m.settings.SkipWord
 	final, err := tea.NewProgram(m).Run()
@@ -799,6 +1021,13 @@ func RunCharm(test *Test, saved runtimeSettings, overrides settingsOverrides, fl
 		return nil, 1, err
 	}
 	if finalModel, ok := final.(appModel); ok && finalModel.quitting {
+		saveError := finalModel.backgroundSaveError
+		if finalModel.saveState == SaveFailed {
+			saveError = finalModel.saveError
+		}
+		if saveError != "" {
+			fmt.Fprintf(os.Stderr, "not stored: %s\n", saveError)
+		}
 		return nil, 1, nil
 	}
 	return nil, 0, nil

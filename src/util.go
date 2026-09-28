@@ -1,14 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"io/ioutil"
-	"math/rand"
+	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/gdamore/tcell"
 )
@@ -76,18 +77,14 @@ func wordWrap(s string, n int) string {
 	return string(r)
 }
 
-func init() {
-	rand.Seed(time.Now().Unix())
-}
-
 func randomText(n int, words []string) string {
 	r := ""
 
 	var last string
 	for i := 0; i < n; i++ {
-		w := words[rand.Int()%len(words)]
+		w := words[rand.IntN(len(words))]
 		for last == w {
-			w = words[rand.Int()%len(words)]
+			w = words[rand.IntN(len(words))]
 		}
 
 		r += w
@@ -198,25 +195,57 @@ func newTcellColor(s string) (tcell.Color, error) {
 	return tcell.NewRGBColor(r, g, b), nil
 }
 
-func readResource(typ, name string) []byte {
-	if name == "-" {
-		b, err := ioutil.ReadAll(os.Stdin)
-		if err != nil {
-			panic(err)
-		}
+type ResourceOrigin struct {
+	Kind     string
+	PackID   string
+	Revision string
+	Path     string
+	Embedded bool
+}
 
-		return b
+func resourceKind(typ string, embedded bool) string {
+	kind := strings.TrimSuffix(typ, "s")
+	if embedded {
+		return "embedded-" + kind
+	}
+	return "private-" + kind
+}
+
+func ResolveResource(typ, name string) ([]byte, ResourceOrigin, error) {
+	if name == "-" {
+		b, err := io.ReadAll(os.Stdin)
+		return b, ResourceOrigin{Kind: resourceKind(typ, false), Path: "-"}, err
 	}
 
-	if b, err := ioutil.ReadFile(name); err == nil {
-		return b
+	if b, err := os.ReadFile(name); err == nil {
+		return b, ResourceOrigin{Kind: resourceKind(typ, false), Path: name}, nil
 	}
 
 	for _, d := range CONFIG_DIRS {
-		if b, err := ioutil.ReadFile(filepath.Join(d, typ, name)); err == nil {
-			return b
+		path := filepath.Join(d, typ, name)
+		if b, err := os.ReadFile(path); err == nil {
+			return b, ResourceOrigin{Kind: resourceKind(typ, false), Path: path}, nil
 		}
 	}
 
-	return readPackedFile(filepath.Join(typ, name))
+	b := readPackedFile(filepath.Join(typ, name))
+	if b == nil {
+		return nil, ResourceOrigin{}, fmt.Errorf("%s resource %q not found", typ, name)
+	}
+	sum := sha256.Sum256(b)
+	return b, ResourceOrigin{
+		Kind: resourceKind(typ, true), PackID: name,
+		Revision: hex.EncodeToString(sum[:]), Embedded: true,
+	}, nil
+}
+
+func readResource(typ, name string) []byte {
+	b, _, err := ResolveResource(typ, name)
+	if err != nil {
+		if name == "-" {
+			panic(err)
+		}
+		return nil
+	}
+	return b
 }

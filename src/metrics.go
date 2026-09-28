@@ -72,6 +72,9 @@ type SessionResult struct {
 	Measurements       Measurements `json:"measurements"`
 	EligibilityReasons []string     `json:"eligibility_reasons"`
 	Attribution        string       `json:"attribution,omitempty"`
+	Prompt             string       `json:"-"`
+	ActiveNS           int64        `json:"-"`
+	PauseNS            int64        `json:"-"`
 }
 
 func rate(count int, activeNS, divisor float64) *float64 {
@@ -425,6 +428,7 @@ func FinishResult(s Session, finishedUnixMS int64) (SessionResult, error) {
 		Config: TestConfig{}, Outcome: string(s.State), Practice: s.RetryOf != "",
 		AllowBackspace: s.AllowBackspace, SkipWord: s.SkipWord,
 		Measurements: measurements, EligibilityReasons: []string{},
+		Prompt: s.promptText, ActiveNS: s.ActiveNS, PauseNS: s.PauseNS,
 	}
 	if s.Test != nil {
 		result.Config = s.Test.Config

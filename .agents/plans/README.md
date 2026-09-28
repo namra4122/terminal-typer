@@ -38,9 +38,9 @@ An opt-in Charm screen runs a real English word-count test from generation throu
 
 A completed Charm test shows one deterministic metric definition with clear Retry and Next behavior. Required predecessors: 1.
 
-### [003: Completed results survive restart](003-durable-local-history.md)
+### [003: Completed results survive restart](003-durable-local-history.md) — implemented
 
-Completed Charm tests appear in a durable local History list without retaining private input text. Required predecessors: 2.
+Completed Charm tests appear in a durable local History list without retaining private input text. Implementation record completed 2026-09-28. Required predecessors: 2.
 
 ### [004: Review and practice measured weaknesses](004-weakness-practice.md)
 
