@@ -46,17 +46,22 @@ type InputEvent struct {
 	CursorBefore, CursorAfter int
 }
 type Session struct {
-	AttemptID, PromptID, RetryOf             string
-	Test                                     *Test
-	State                                    SessionState
-	Cursor                                   int
-	Typed                                    []rune
-	promptText                               string
-	promptRunes                              []rune
-	Events                                   []InputEvent
-	StartedAtNS, LastAtNS, ActiveNS, PauseNS int64
-	PauseReasons                             map[string]bool
-	RestartUntilNS                           int64
+	AttemptID, PromptID, RetryOf                   string
+	Test                                           *Test
+	AllowBackspace, SkipWord                       bool
+	State                                          SessionState
+	Cursor                                         int
+	Typed                                          []rune
+	promptText                                     string
+	promptRunes                                    []rune
+	Events                                         []InputEvent
+	ExtraByWord                                    map[int][]rune
+	StartedAtNS, LastAtNS, ActiveNS, PauseNS       int64
+	PauseReasons                                   map[string]bool
+	RestartUntilNS                                 int64
+	liveCorrect, liveAttempts, liveCorrectAttempts int
+	liveErrors, liveCorrectedErrors                int
+	liveErrorSlots                                 map[int]bool
 }
 
 func newSessionID() (string, error) {
@@ -79,7 +84,32 @@ func NewSession(test *Test, attemptID, promptID string) *Session {
 	promptText := prompt.String()
 	promptRunes := []rune(promptText)
 	typed := make([]rune, len(promptRunes))
-	return &Session{AttemptID: attemptID, PromptID: promptID, Test: test, State: SessionReady, Typed: typed, promptText: promptText, promptRunes: promptRunes, PauseReasons: map[string]bool{}}
+	return &Session{AttemptID: attemptID, PromptID: promptID, Test: test, State: SessionReady, Typed: typed, promptText: promptText, promptRunes: promptRunes, PauseReasons: map[string]bool{}, liveErrorSlots: map[int]bool{}, ExtraByWord: map[int][]rune{}}
+}
+
+func (s *Session) setTyped(slot int, value rune) {
+	if slot < 0 || slot >= len(s.Typed) {
+		return
+	}
+	if s.promptRunes[slot] == '\n' {
+		s.Typed[slot] = value
+		return
+	}
+	expected := s.promptRunes[slot]
+	if s.Typed[slot] != 0 && s.Typed[slot] == expected {
+		s.liveCorrect--
+	}
+	if value != 0 && value == expected {
+		s.liveCorrect++
+	}
+	s.Typed[slot] = value
+}
+
+func (s *Session) correctLiveError(slot int) {
+	if s.liveErrorSlots[slot] {
+		delete(s.liveErrorSlots, slot)
+		s.liveCorrectedErrors++
+	}
 }
 func (s *Session) prompt() []rune {
 	return s.promptRunes
@@ -157,21 +187,47 @@ func (s *Session) Apply(in SessionInput) error {
 			s.State = SessionRunning
 			s.StartedAtNS = in.AtNS
 		}
-		s.Typed[s.Cursor] = textRune
+		slot := s.Cursor
+		if p[slot] == ' ' && textRune != ' ' && slot > 0 && !unicode.IsSpace(p[slot-1]) {
+			s.ExtraByWord[slot] = append(s.ExtraByWord[slot], textRune)
+			s.liveAttempts++
+			s.liveErrors++
+			break
+		}
+		s.liveAttempts++
+		s.correctLiveError(slot)
+		if textRune == p[slot] {
+			s.liveCorrectAttempts++
+		} else {
+			s.liveErrors++
+			s.liveErrorSlots[slot] = true
+		}
+		s.setTyped(slot, textRune)
 		s.Cursor++
 		for s.Cursor < len(p) && p[s.Cursor] == '\n' {
-			s.Typed[s.Cursor] = p[s.Cursor]
+			s.setTyped(s.Cursor, p[s.Cursor])
 			s.Cursor++
 		}
 	case InputBackspace:
-		if s.Cursor > 0 {
+		if extras := s.ExtraByWord[s.Cursor]; len(extras) > 0 {
+			s.ExtraByWord[s.Cursor] = extras[:len(extras)-1]
+			if len(s.ExtraByWord[s.Cursor]) == 0 {
+				delete(s.ExtraByWord, s.Cursor)
+			}
+			s.liveCorrectedErrors++
+		} else if s.Cursor > 0 {
 			s.Cursor--
 			for s.Cursor > 0 && p[s.Cursor] == '\n' {
 				s.Cursor--
 			}
-			s.Typed[s.Cursor] = 0
+			s.correctLiveError(s.Cursor)
+			s.setTyped(s.Cursor, 0)
 		}
 	case InputDeleteWord:
+		if extras := s.ExtraByWord[s.Cursor]; len(extras) > 0 {
+			s.liveCorrectedErrors += len(extras)
+			delete(s.ExtraByWord, s.Cursor)
+		}
 		if s.Cursor > 0 {
 			s.Cursor--
 			for s.Cursor > 0 && (p[s.Cursor] == ' ' || p[s.Cursor] == '\n') {
@@ -181,21 +237,28 @@ func (s *Session) Apply(in SessionInput) error {
 				s.Cursor--
 			}
 			if p[s.Cursor] == ' ' || p[s.Cursor] == '\n' {
-				s.Typed[s.Cursor] = p[s.Cursor]
-				s.Cursor++
+				s.setTyped(s.Cursor, p[s.Cursor])
 			}
 			for i := s.Cursor; i < before; i++ {
-				s.Typed[i] = 0
+				s.correctLiveError(i)
+				s.setTyped(i, 0)
 			}
 		}
 	case InputSkip:
 		if s.Cursor < len(p) {
 			for s.Cursor < len(p) && p[s.Cursor] != ' ' && p[s.Cursor] != '\n' {
-				s.Typed[s.Cursor] = 0
+				s.correctLiveError(s.Cursor)
+				s.liveErrors++
+				s.liveErrorSlots[s.Cursor] = true
+				s.setTyped(s.Cursor, 0)
 				s.Cursor++
 			}
 			if s.Cursor < len(p) {
-				s.Typed[s.Cursor] = p[s.Cursor]
+				if p[s.Cursor] == ' ' {
+					s.liveAttempts++
+					s.liveCorrectAttempts++
+				}
+				s.setTyped(s.Cursor, p[s.Cursor])
 				s.Cursor++
 			}
 		}
@@ -218,9 +281,17 @@ func (s *Session) Snapshot() Session {
 	cp.promptRunes = append([]rune(nil), s.promptRunes...)
 	cp.Typed = append([]rune(nil), s.Typed...)
 	cp.Events = append([]InputEvent(nil), s.Events...)
+	cp.ExtraByWord = make(map[int][]rune, len(s.ExtraByWord))
+	for word, extra := range s.ExtraByWord {
+		cp.ExtraByWord[word] = append([]rune(nil), extra...)
+	}
 	cp.PauseReasons = make(map[string]bool, len(s.PauseReasons))
 	for k, v := range s.PauseReasons {
 		cp.PauseReasons[k] = v
+	}
+	cp.liveErrorSlots = make(map[int]bool, len(s.liveErrorSlots))
+	for slot, present := range s.liveErrorSlots {
+		cp.liveErrorSlots[slot] = present
 	}
 	if s.Test != nil {
 		testCopy := *s.Test

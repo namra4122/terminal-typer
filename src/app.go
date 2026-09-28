@@ -61,6 +61,7 @@ type appModel struct {
 	testError           string
 	savingSettings      bool
 	resultReadyAtNS     int64
+	result              *SessionResult
 }
 type appTick time.Time
 
@@ -79,6 +80,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.saved = v.settings
 		m.draftSettings = v.settings
 		m.settings = effectiveRuntimeSettings(v.settings, m.overrides, m.flags)
+		m.session.AllowBackspace = m.settings.AllowBackspace
+		m.session.SkipWord = m.settings.SkipWord
 		m.dirty = nil
 		m.message = ""
 		m.settingsOpen = false
@@ -219,6 +222,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.requestNextTest()
 			}
 			return m, nil
+		case "r":
+			if !m.settingsOpen && (m.session.State == SessionCompleted || m.session.State == SessionExpired) {
+				if err := m.restartCurrentAttempt(); err != nil {
+					m.testError = err.Error()
+				}
+				return m, nil
+			}
 		case "space":
 			if m.settingsOpen {
 				advanceSetting(&m.draftSettings, m.selected)
@@ -276,7 +286,6 @@ func (m *appModel) refreshMeaningful() {
 		m.meaningful = true
 	}
 }
-
 func (m *appModel) expireIfNeeded(now int64) {
 	if m.timeLimit >= 0 && m.session.State == SessionRunning && m.session.ActiveNS >= int64(m.timeLimit) {
 		m.session.ActiveNS = int64(m.timeLimit)
@@ -286,8 +295,14 @@ func (m *appModel) expireIfNeeded(now int64) {
 }
 
 func (m *appModel) markResultReady(now int64) {
-	if (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.resultReadyAtNS == 0 {
+	if (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.result == nil && m.resultReadyAtNS == 0 {
 		m.resultReadyAtNS = now
+		result, err := FinishResult(m.session.Snapshot(), time.Now().UTC().UnixMilli())
+		if err == nil {
+			m.result = &result
+		} else {
+			m.testError = err.Error()
+		}
 	}
 }
 
@@ -431,20 +446,6 @@ func promptViewport(prompt string, cursor, width, rows int) (start, end, startLi
 	return start, end, startLine, true
 }
 
-func sessionCharacterCounts(session *Session) (correct, total int) {
-	prompt := session.prompt()
-	for i, expected := range prompt {
-		if expected == '\n' {
-			continue
-		}
-		total++
-		if i < len(session.Typed) && session.Typed[i] == expected {
-			correct++
-		}
-	}
-	return correct, total
-}
-
 func (m *appModel) activateTest(attemptID string) error {
 	if m.testIndex < 0 || m.testIndex >= len(m.tests) {
 		return fmt.Errorf("test index %d is unavailable", m.testIndex)
@@ -458,6 +459,8 @@ func (m *appModel) activateTest(attemptID string) error {
 		}
 	}
 	session := NewSession(entry.test, attemptID, entry.promptID)
+	session.AllowBackspace = m.settings.AllowBackspace
+	session.SkipWord = m.settings.SkipWord
 	if previous := m.attempts[entry.promptID]; previous != "" {
 		session.RetryOf = previous
 	}
@@ -470,8 +473,8 @@ func (m *appModel) activateTest(attemptID string) error {
 	m.meaningful = false
 	m.processedEventCount = 0
 	m.textInputCount = 0
-	m.restartPending = false
 	m.resultReadyAtNS = 0
+	m.result = nil
 	m.testError = ""
 	return nil
 }
@@ -483,6 +486,8 @@ func (m *appModel) restartCurrentAttempt() error {
 	}
 	previousAttempt := m.session.AttemptID
 	m.session = NewSession(m.session.Test, attemptID, m.session.PromptID)
+	m.session.AllowBackspace = m.settings.AllowBackspace
+	m.session.SkipWord = m.settings.SkipWord
 	m.session.RetryOf = previousAttempt
 	if m.attempts == nil {
 		m.attempts = make(map[string]string)
@@ -491,6 +496,7 @@ func (m *appModel) restartCurrentAttempt() error {
 	m.meaningful = false
 	m.restartPending = false
 	m.resultReadyAtNS = 0
+	m.result = nil
 	m.processedEventCount = 0
 	m.textInputCount = 0
 	m.testError = ""
@@ -565,31 +571,54 @@ func (m appModel) View() tea.View {
 			b.WriteString("\nd discard changes · Ctrl-P/Escape retry save")
 		}
 	} else if m.session.State == SessionCompleted || m.session.State == SessionExpired {
-		correct, total := sessionCharacterCounts(m.session)
-		mins := float64(m.session.ActiveNS) / 60e9
-		wpm := 0
-		cpm := 0
-		if mins > 0 {
-			cpm = int(float64(correct) / mins)
-			wpm = cpm / 5
+		result := m.result
+		if result == nil {
+			b.WriteString("Unable to calculate results · Ctrl-C: quit")
+		} else {
+			metrics := result.Measurements
+			wpm := metricDisplay(metrics.WPM, "")
+			rawWPM := metricDisplay(metrics.RawWPM, "")
+			cpm := metricDisplay(metrics.CPM, "")
+			accuracy := metricDisplay(metrics.Accuracy, "%")
+			consistency := metricDisplay(metrics.Consistency, "%")
+			label := ""
+			if metrics.ActiveMS > 0 && metrics.ActiveMS < 1000 {
+				label = " · short sample"
+			}
+			fmt.Fprintf(&b, "Results · %s%s\n\nEffective WPM  %s\nAccuracy       %s\nConsistency    %s\nRaw WPM        %s\nCPM            %s\nErrors         %d total · %d uncorrected\nTime           %.2fs active · %.2fs paused\nFinal speeds can differ from interval speeds after corrections.",
+				result.Outcome, label, wpm, accuracy, consistency, rawWPM, cpm, metrics.Errors.Total, metrics.Errors.Uncorrected,
+				float64(metrics.ActiveMS)/1000, float64(metrics.PauseMS)/1000)
+			fmt.Fprintf(&b, "\nConfig        %s · %d words · %d groups", result.Config.Mode, result.Config.WordCount, result.Config.Groups)
+			backspace, skip := "disabled", "disabled"
+			if result.AllowBackspace {
+				backspace = "enabled"
+			}
+			if result.SkipWord {
+				skip = "enabled"
+			}
+			fmt.Fprintf(&b, "\nInput         backspace %s · skip %s", backspace, skip)
+			if len(result.EligibilityReasons) > 0 {
+				fmt.Fprintf(&b, "\nEligibility   %s", strings.Join(result.EligibilityReasons, "; "))
+			}
+			if result.Attribution != "" {
+				fmt.Fprintf(&b, "\nSource         %s", result.Attribution)
+			}
+			if result.RetryOf != "" {
+				b.WriteString("\nRetry          practice · PB-ineligible")
+			}
+			fmt.Fprintf(&b, "\n\nEnter: Next · r: Retry · Ctrl-C: quit")
 		}
-		accuracy := 0.0
-		if total > 0 {
-			accuracy = float64(correct) / float64(total) * 100
-		}
-		fmt.Fprintf(&b, "Test complete\n\nWPM %d   CPM %d   Accuracy %.1f%%\n\nEnter: new test · Escape: retry · Ctrl-C: quit", wpm, cpm, accuracy)
 	} else {
 		cfg := m.session.Test.Config
-		fmt.Fprintf(&b, "Words · %d words · %d groups · %d/%d chars\n\n", cfg.WordCount, cfg.Groups, m.session.Cursor, len(m.session.Typed))
-		if m.settings.ShowWPM && m.session.ActiveNS > 0 {
-			correct, _ := sessionCharacterCounts(m.session)
-			wpm := int(float64(correct) / 5 / (float64(m.session.ActiveNS) / 60e9))
-			fmt.Fprintf(&b, "WPM %d\n\n", wpm)
+		live, _ := Measure(*m.session)
+		fmt.Fprintf(&b, "Words · %d words · %d groups · %d/%d chars · total errors %d\n\n", cfg.WordCount, cfg.Groups, m.session.Cursor, len(m.session.Typed), live.Errors.Total)
+		if m.settings.ShowWPM && m.session.ActiveNS >= int64(time.Second) && live.WPM != nil {
+			fmt.Fprintf(&b, "WPM %s\n\n", metricDisplay(live.WPM, ""))
 		}
 		p := m.session.prompt()
 		currentStart, currentEnd, nextStart, nextEnd := promptWordRanges(p, m.session.Cursor)
 		headerRows := 2
-		if m.settings.ShowWPM && m.session.ActiveNS > 0 {
+		if m.settings.ShowWPM && m.session.ActiveNS >= int64(time.Second) && live.WPM != nil {
 			headerRows += 2
 		}
 		promptRows := m.height - headerRows - 3
@@ -755,6 +784,8 @@ func RunCharm(test *Test, saved runtimeSettings, overrides settingsOverrides, fl
 		generateTest:  newTestGenerator(test.Config, nil),
 		attempts:      map[string]string{prompt: attempt},
 	}
+	m.session.AllowBackspace = m.settings.AllowBackspace
+	m.session.SkipWord = m.settings.SkipWord
 	final, err := tea.NewProgram(m).Run()
 	if err != nil {
 		return nil, 1, err

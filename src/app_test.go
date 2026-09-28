@@ -316,3 +316,88 @@ func TestCharmRouteRejectsUnsupportedInvocation(t *testing.T) {
 		}
 	}
 }
+
+func TestCharmResultsFreezeMetricsAndRetrySamePrompt(t *testing.T) {
+	session := testSession("a")
+	session.AttemptID = "first-attempt"
+	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	model := appModel{session: session, settings: defaultRuntimeSettings()}
+	model.markResultReady(2)
+	if model.result == nil || model.result.Measurements.Characters.Correct != 1 {
+		t.Fatalf("completion did not freeze a result: %#v", model.result)
+	}
+	frozen := model.result
+	model.markResultReady(3)
+	if model.result != frozen {
+		t.Fatal("duplicate completion replaced the frozen result")
+	}
+	session.Typed[0] = 'x'
+	if model.result.Measurements.Characters.Correct != 1 {
+		t.Fatal("frozen result changed with live session state")
+	}
+	view := model.View()
+	if !strings.Contains(view.Content, "Results") || !strings.Contains(view.Content, "Enter: Next") || !strings.Contains(view.Content, "r: Retry") ||
+		!strings.Contains(view.Content, "Final speeds can differ from interval speeds after corrections.") {
+		t.Fatalf("Results view lacks metric/action content: %q", view.Content)
+	}
+	model.resultReadyAtNS = sessionNow() - int64(200*time.Millisecond) - 1
+	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Text: "r", Code: 'r'}))
+	model = updated.(appModel)
+	if model.session.PromptID != "prompt" || model.session.RetryOf != "first-attempt" || model.session.State != SessionReady || string(model.session.prompt()) != "a" {
+		t.Fatalf("retry did not restart the identical prompt: %#v", model.session)
+	}
+}
+
+func TestCharmResultsRoundAccuracyToTwoDecimals(t *testing.T) {
+	prompt := strings.Repeat("a", 300)
+	session := testSession(prompt)
+	for i := 0; i < 300; i++ {
+		character := "a"
+		if i >= 275 {
+			character = "b"
+		}
+		if err := session.Apply(SessionInput{Kind: InputText, Text: character, AtNS: int64(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session.ActiveNS = 60e9
+	model := appModel{session: session, settings: defaultRuntimeSettings()}
+	model.markResultReady(60e9)
+	if model.result == nil {
+		t.Fatalf("failed to freeze result: %q", model.testError)
+	}
+	view := model.View().Content
+	if !strings.Contains(view, "91.67%") {
+		t.Fatalf("Results accuracy not rounded to two decimals: %q", view)
+	}
+}
+
+func TestCharmLabelsShortSampleAndWaitsForOneSecondLiveSpeed(t *testing.T) {
+	session := testSession("a b")
+	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	session.ActiveNS = 999_999_999
+	settings := defaultRuntimeSettings()
+	settings.ShowWPM = true
+	model := appModel{session: session, settings: settings}
+	if view := model.View().Content; strings.Contains(view, "WPM") {
+		t.Fatalf("live speed appeared before one active second: %q", view)
+	}
+	session.ActiveNS = int64(time.Second)
+	if view := model.View().Content; !strings.Contains(view, "WPM") {
+		t.Fatalf("live speed remained unavailable at one active second: %q", view)
+	}
+	completed := testSession("a")
+	if err := completed.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	completed.ActiveNS = int64(time.Millisecond)
+	resultModel := appModel{session: completed, settings: settings}
+	resultModel.markResultReady(1)
+	if view := resultModel.View().Content; !strings.Contains(view, "short sample") {
+		t.Fatalf("short final sample was not labeled: %q", view)
+	}
+}

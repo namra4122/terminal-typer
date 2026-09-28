@@ -30,6 +30,14 @@ usage: tt \[OPTION\]... \[FILE\]
   can be selected with **TT_UI=charm** for terminal word tests; unsupported
   invocations continue through the existing renderer.
 
+  On the Charm route, completed tests show effective/raw WPM, CPM, input
+  accuracy, consistency, error totals, active and paused time, configuration,
+  eligibility, and available source/retry details. Zero-duration speeds are
+  unavailable; short samples are labeled. Results are in-memory; the existing
+  process-exit JSON/CSV schemas are unchanged. Consistency uses active-time
+  interval raw-WPM rates, which can differ from final retained-character speeds.
+
+
 # OPTIONS
 
 ## Modes
@@ -231,12 +239,14 @@ Modify to taste.
 
 # KEYS
 
-  **esc: ** Restarts the test\
+  **esc: ** Restarts the test; on the Results screen retries the same prompt.\
   **C-c: ** Terminates tt\
   **C-p: ** Opens Settings during an active test and pauses its timer. In
   Settings, **up**/**down** select a row, **space** or **enter** changes it, and
   **esc** or **C-p** saves and returns to the same test.\
   **C-backspace: ** Deletes the previous word\
+  **r: ** Retries the completed prompt from the Results screen.\
+  **enter: ** Starts the next test from the Results screen.\
   **right** Move to the next test.\
   **left** Move to the previous test.
 
