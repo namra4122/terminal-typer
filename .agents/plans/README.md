@@ -42,9 +42,9 @@ A completed Charm test shows one deterministic metric definition with clear Retr
 
 Completed Charm tests appear in a durable local History list without retaining private input text. Implementation record completed 2026-09-28. Required predecessors: 2.
 
-### [004: Review and practice measured weaknesses](004-weakness-practice.md)
+### [004: Review and practice measured weaknesses](004-weakness-practice.md) - implemented
 
-After a real test, a user can review measured weaknesses, complete a short targeted drill, and compare practiced items. Required predecessors: 3.
+After a real Charm word test, a user can review measured weaknesses, complete a short targeted drill, and compare practiced items. Implementation record completed 2026-10-01. Required predecessors: 3.
 
 ### [005: Launch the remembered test immediately](005-remembered-test-modes.md)
 

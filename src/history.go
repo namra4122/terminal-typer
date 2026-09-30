@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -44,8 +45,9 @@ const (
 )
 
 type HistoryQuery struct {
-	Practice      bool
-	Offset, Limit int
+	Practice                   bool
+	Offset, Limit              int
+	PackID, PackRevision, Mode string
 }
 
 type HistoryPage struct {
@@ -88,15 +90,24 @@ type HistoryMeasurements struct {
 	Series          []HistorySample `json:"series"`
 }
 
+type HistoryOccurrence struct {
+	ActiveMS        int64 `json:"activeMS"`
+	Scalars         int   `json:"scalars"`
+	Attempts        int   `json:"attempts"`
+	CorrectAttempts int   `json:"correctAttempts"`
+	Errors          int   `json:"errors"`
+}
+
 type HistoryFragment struct {
-	Item            string `json:"item"`
-	Kind            string `json:"kind"`
-	Occurrences     int    `json:"occurrences"`
-	Attempts        int    `json:"attempts"`
-	CorrectAttempts int    `json:"correctAttempts"`
-	Errors          int    `json:"errors"`
-	ActiveMS        int64  `json:"activeMS"`
-	Context         string `json:"context"`
+	Item            string              `json:"item"`
+	Kind            string              `json:"kind"`
+	Occurrences     int                 `json:"occurrences"`
+	Attempts        int                 `json:"attempts"`
+	CorrectAttempts int                 `json:"correctAttempts"`
+	Errors          int                 `json:"errors"`
+	ActiveMS        int64               `json:"activeMS"`
+	Context         string              `json:"context"`
+	Observations    []HistoryOccurrence `json:"observations,omitempty"`
 }
 
 type HistoryAttribution struct {
@@ -136,6 +147,7 @@ type HistoryRecord struct {
 	Fragments          []HistoryFragment   `json:"fragments"`
 	Attribution        HistoryAttribution  `json:"attribution"`
 	EligibilityReasons []string            `json:"eligibilityReasons"`
+	PracticeDetail     *PracticeDetail     `json:"practiceDetail,omitempty"`
 }
 
 type historyEnvelope struct {
@@ -216,7 +228,7 @@ func ProjectHistory(result SessionResult, origin ResourceOrigin, _ PrivacyPolicy
 	if public && result.Attribution != "" {
 		record.Attribution.Source = result.Attribution
 	}
-	if public {
+	if public && !result.Practice {
 		record.Fragments = projectFragments(result)
 	}
 	return record
@@ -256,28 +268,73 @@ func safeEligibilityReasons(reasons []string) []string {
 func projectFragments(result SessionResult) []HistoryFragment {
 	promptRunes := []rune(result.Prompt)
 	trimmedPrompt := strings.TrimSpace(result.Prompt)
-	fragments := make([]HistoryFragment, 0, 20)
+	quote := result.Config.Mode == quoteMode || result.Config.Source == quoteSource
+	contexts := quoteContextSpans(promptRunes)
+	type fragmentState struct {
+		fragment HistoryFragment
+	}
+	byItem := make(map[string]*fragmentState)
+	order := make([]string, 0, 20)
 	for _, word := range result.Measurements.Words {
-		if word.Errors <= 0 || word.Start < 0 || word.End > len(promptRunes) || word.Start >= word.End {
+		if !word.Complete || word.Start < 0 || word.End > len(promptRunes) || word.Start >= word.End || word.ActiveMS < 0 ||
+			word.Attempts < 0 || word.CorrectAttempts < 0 || word.Errors < 0 {
 			continue
 		}
 		item := string(promptRunes[word.Start:word.End])
-		if utf8.RuneCountInString(item) > 64 || item == trimmedPrompt {
+		if item == "" || utf8.RuneCountInString(item) > 64 || item == trimmedPrompt {
 			continue
 		}
-		fragments = append(fragments, HistoryFragment{
-			Item: item, Kind: "word", Occurrences: 1, Attempts: word.Attempts,
-			CorrectAttempts: word.CorrectAttempts, Errors: word.Errors, ActiveMS: word.ActiveMS,
-		})
-		if len(fragments) == 20 {
-			break
+		// Error observations are useful even with a zero duration; correct
+		// observations need a measured duration to support slow-only ranking.
+		if word.Errors <= 0 && word.ActiveMS <= 0 {
+			continue
+		}
+		state := byItem[item]
+		if state == nil {
+			if len(order) == 20 {
+				continue
+			}
+			state = &fragmentState{fragment: HistoryFragment{Item: item, Kind: "word"}}
+			byItem[item] = state
+			order = append(order, item)
+		}
+		observation := HistoryOccurrence{
+			ActiveMS: word.ActiveMS, Scalars: utf8.RuneCountInString(item),
+			Attempts: word.Attempts, CorrectAttempts: word.CorrectAttempts, Errors: word.Errors,
+		}
+		state.fragment.Observations = append(state.fragment.Observations, observation)
+		if len(state.fragment.Observations) > 50 {
+			state.fragment.Observations = state.fragment.Observations[len(state.fragment.Observations)-50:]
+		}
+		if quote {
+			if context := quoteContext(promptRunes, contexts, word.Start, word.End); context != "" {
+				state.fragment.Context = context
+			}
 		}
 	}
-	if len(fragments) > 0 {
-		retained := make(map[string]bool, len(fragments))
-		for _, fragment := range fragments {
-			retained[fragment.Item] = true
+	fragments := make([]HistoryFragment, 0, len(order))
+	retained := make(map[string]bool, len(order))
+	for _, item := range order {
+		state := byItem[item]
+		fragment := state.fragment
+		for _, observation := range fragment.Observations {
+			fragment.Occurrences++
+			fragment.Attempts += observation.Attempts
+			fragment.CorrectAttempts += observation.CorrectAttempts
+			fragment.Errors += observation.Errors
+			fragment.ActiveMS += observation.ActiveMS
 		}
+		if fragment.Context != "" && strings.TrimSpace(fragment.Context) == trimmedPrompt {
+			continue
+		}
+		if fragment.Occurrences == 0 {
+			continue
+		}
+		retained[item] = true
+		fragments = append(fragments, fragment)
+	}
+	// Never retain enough fragments to reconstruct the complete source prompt.
+	if len(fragments) > 0 {
 		allWordsRetained := true
 		for _, word := range strings.Fields(trimmedPrompt) {
 			if !retained[word] {
@@ -296,6 +353,53 @@ func projectFragments(result SessionResult) []HistoryFragment {
 		return fragments[i].Item < fragments[j].Item
 	})
 	return fragments
+}
+
+type quoteWordSpan struct {
+	start, end int
+}
+
+func quoteContextSpans(prompt []rune) []quoteWordSpan {
+	spans := make([]quoteWordSpan, 0)
+	for i := 0; i < len(prompt); {
+		for i < len(prompt) && unicode.IsSpace(prompt[i]) {
+			i++
+		}
+		start := i
+		for i < len(prompt) && !unicode.IsSpace(prompt[i]) {
+			i++
+		}
+		if start < i {
+			spans = append(spans, quoteWordSpan{start: start, end: i})
+		}
+	}
+	return spans
+}
+
+func quoteContext(prompt []rune, spans []quoteWordSpan, start, end int) string {
+	index := -1
+	for i, span := range spans {
+		if start >= span.start && end <= span.end {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return ""
+	}
+	from := index - 2
+	if from < 0 {
+		from = 0
+	}
+	to := from + 5
+	if to > len(spans) {
+		to = len(spans)
+		from = to - 5
+		if from < 0 {
+			from = 0
+		}
+	}
+	return string(prompt[spans[from].start:spans[to-1].end])
 }
 
 func privateSourceKind(source testSource) string {
@@ -413,9 +517,13 @@ func ReadHistory(root string, query HistoryQuery) (HistoryPage, error) {
 	}
 	filtered := records[:0]
 	for _, record := range records {
-		if record.Practice == query.Practice {
-			filtered = append(filtered, record)
+		if record.Practice != query.Practice ||
+			(query.PackID != "" && record.PackID != query.PackID) ||
+			(query.PackRevision != "" && record.PackRevision != query.PackRevision) ||
+			(query.Mode != "" && record.Mode != query.Mode) {
+			continue
 		}
+		filtered = append(filtered, record)
 	}
 	sort.Slice(filtered, func(i, j int) bool {
 		if filtered[i].FinishedUnixMS != filtered[j].FinishedUnixMS {
@@ -579,8 +687,72 @@ func validateHistoryRecord(record HistoryRecord) error {
 		}
 	}
 	for _, fragment := range record.Fragments {
-		if (fragment.Kind != "word" && fragment.Kind != "pair") || fragment.Item == "" || utf8.RuneCountInString(fragment.Item) > 64 || len(strings.Fields(fragment.Context)) > 5 {
+		if (fragment.Kind != "word" && fragment.Kind != "pair") || fragment.Item == "" || utf8.RuneCountInString(fragment.Item) > 64 || len(strings.Fields(fragment.Context)) > 5 ||
+			fragment.Occurrences < 0 || fragment.Attempts < 0 || fragment.CorrectAttempts < 0 ||
+			fragment.Errors < 0 || fragment.ActiveMS < 0 {
 			return errors.New("invalid fragment")
+		}
+		if len(fragment.Observations) > 50 {
+			return errors.New("too many fragment observations")
+		}
+		var occurrences, attempts, correctAttempts, errs int
+		var activeMS int64
+		for _, observation := range fragment.Observations {
+			if observation.ActiveMS < 0 || observation.Scalars <= 0 || observation.Attempts < 0 ||
+				observation.CorrectAttempts < 0 || observation.Errors < 0 ||
+				observation.CorrectAttempts > observation.Attempts {
+				return errors.New("invalid fragment observation")
+			}
+			occurrences++
+			attempts += observation.Attempts
+			correctAttempts += observation.CorrectAttempts
+			errs += observation.Errors
+			activeMS += observation.ActiveMS
+		}
+		if len(fragment.Observations) > 0 &&
+			(fragment.Occurrences != occurrences || fragment.Attempts != attempts ||
+				fragment.CorrectAttempts != correctAttempts || fragment.Errors != errs || fragment.ActiveMS != activeMS) {
+			return errors.New("fragment summary does not match observations")
+		}
+	}
+	if record.Practice {
+		// Older v1 retries can have public mistake fragments. Keep them readable,
+		// but never persist fragments alongside a newly generated practice detail.
+		if record.PracticeDetail != nil && len(record.Fragments) != 0 {
+			return errors.New("practice detail contains retained prompt fragments")
+		}
+	} else if record.PracticeDetail != nil {
+		return errors.New("regular record contains practice detail")
+	}
+	if record.PracticeDetail != nil && (!record.Practice || record.Privacy != "public" ||
+		(record.SourceKind != "embedded-word" && record.SourceKind != "embedded-quote")) {
+		return errors.New("practice detail requires public embedded source")
+	}
+	if record.PracticeDetail != nil {
+		if record.PracticeDetail.ParentID == "" || record.PracticeDetail.WindowStartUnixMS < 0 ||
+			record.PracticeDetail.SampleSessions < 0 || len(record.PracticeDetail.Items) > 5 ||
+			len(record.PracticeDetail.Comparisons) > 5 || record.PracticeDetail.Items == nil || record.PracticeDetail.Comparisons == nil {
+			return errors.New("invalid practice detail")
+		}
+		for _, item := range record.PracticeDetail.Items {
+			if item.Item == "" || utf8.RuneCountInString(item.Item) > 64 || len(strings.Fields(item.Context)) > 5 ||
+				item.Occurrences < 0 || item.Attempts < 0 || item.CorrectAttempts < 0 || item.Errors < 0 ||
+				item.CorrectAttempts > item.Attempts || item.CurrentOccurrences < 0 || item.HistoryOccurrences < 0 {
+				return errors.New("invalid practice item")
+			}
+			if item.MedianMSPerScalar != nil && (*item.MedianMSPerScalar < 0 || math.IsNaN(*item.MedianMSPerScalar) || math.IsInf(*item.MedianMSPerScalar, 0)) {
+				return errors.New("invalid practice item median")
+			}
+		}
+		for _, comparison := range record.PracticeDetail.Comparisons {
+			if comparison.Item == "" || utf8.RuneCountInString(comparison.Item) > 64 {
+				return errors.New("invalid practice comparison")
+			}
+			for _, value := range []*float64{comparison.AccuracyDelta, comparison.SpeedChangePercent} {
+				if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0)) {
+					return errors.New("invalid practice comparison metric")
+				}
+			}
 		}
 	}
 	if record.Measurements.Series == nil || record.Fragments == nil || record.EligibilityReasons == nil {
@@ -604,6 +776,7 @@ func validHistoryFilename(name string) bool {
 func historySummary(record HistoryRecord) HistoryRecord {
 	record.Measurements.Series = nil
 	record.Fragments = nil
+	record.PracticeDetail = nil
 	return record
 }
 
@@ -665,6 +838,7 @@ func marshalHistoryIndex(index historyIndexDocument) ([]byte, error) {
 		entry, _ := rawEntry.(map[string]any)
 		summary, _ := entry["summary"].(map[string]any)
 		delete(summary, "fragments")
+		delete(summary, "practiceDetail")
 		measurements, _ := summary["measurements"].(map[string]any)
 		delete(measurements, "series")
 	}
@@ -754,6 +928,66 @@ func validateHistoryJSON(data []byte) error {
 		for _, key := range []string{"item", "kind", "occurrences", "attempts", "correctAttempts", "errors", "activeMS", "context"} {
 			if _, ok := fragment[key]; !ok {
 				return fmt.Errorf("missing fragment.%s", key)
+			}
+		}
+		if raw, ok := fragment["observations"]; ok {
+			var observations []map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &observations); err != nil {
+				return err
+			}
+			for _, observation := range observations {
+				for _, key := range []string{"activeMS", "scalars", "attempts", "correctAttempts", "errors"} {
+					if _, ok := observation[key]; !ok {
+						return fmt.Errorf("missing fragment.observations.%s", key)
+					}
+				}
+			}
+		}
+	}
+	if raw, ok := session["practiceDetail"]; ok {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return nil
+		}
+		var detail map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &detail); err != nil {
+			return err
+		}
+		for _, key := range []string{"parentId", "windowStartUnixMS", "sampleSessions", "items", "comparisons"} {
+			if _, ok := detail[key]; !ok {
+				return fmt.Errorf("missing practiceDetail.%s", key)
+			}
+		}
+		var items []map[string]json.RawMessage
+		if err := json.Unmarshal(detail["items"], &items); err != nil {
+			return err
+		}
+		for _, item := range items {
+			for _, key := range []string{"item", "context", "reason", "occurrences", "attempts", "correctAttempts", "errors", "medianMSPerScalar", "currentOccurrences", "historyOccurrences"} {
+				if _, ok := item[key]; !ok {
+					return fmt.Errorf("missing practiceDetail.item.%s", key)
+				}
+			}
+		}
+		var comparisons []map[string]json.RawMessage
+		if err := json.Unmarshal(detail["comparisons"], &comparisons); err != nil {
+			return err
+		}
+		for _, comparison := range comparisons {
+			for _, key := range []string{"item", "baseline", "drill", "accuracyDelta", "speedChangePercent"} {
+				if _, ok := comparison[key]; !ok {
+					return fmt.Errorf("missing practiceDetail.comparison.%s", key)
+				}
+			}
+			for _, side := range []string{"baseline", "drill"} {
+				var item map[string]json.RawMessage
+				if err := json.Unmarshal(comparison[side], &item); err != nil {
+					return err
+				}
+				for _, key := range []string{"item", "context", "reason", "occurrences", "attempts", "correctAttempts", "errors", "medianMSPerScalar", "currentOccurrences", "historyOccurrences"} {
+					if _, ok := item[key]; !ok {
+						return fmt.Errorf("missing practiceDetail.comparison.%s.%s", side, key)
+					}
+				}
 			}
 		}
 	}

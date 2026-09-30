@@ -585,3 +585,215 @@ func TestCharmIgnoresStaleHistoryLoadRequest(t *testing.T) {
 		t.Fatalf("current load was ignored: loading=%v page=%#v", model.historyLoading, model.historyPage)
 	}
 }
+func TestCharmPracticeReviewLoadsAsynchronouslyAndEscapePreservesResult(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "history-v1")
+	test := &Test{
+		Config:             TestConfig{Mode: wordMode, Source: wordSource, Pack: "1000en", TimeLimit: -1, WordCount: 1, WordsPerGroup: 1, Groups: 1},
+		Origin:             ResourceOrigin{Kind: "embedded-word", PackID: "1000en", Revision: strings.Repeat("a", 64), Embedded: true},
+		Segments:           []segment{{Text: "alpha"}},
+		EligibleForHistory: true, EligibleForPB: true,
+	}
+	session := NewSession(test, strings.Repeat("1", 32), strings.Repeat("2", 32))
+	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range []rune("lpha") {
+		if err := session.Apply(SessionInput{Kind: InputText, Text: string(r), AtNS: int64(i) + 2}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := appModel{
+		session: session, settings: defaultRuntimeSettings(), saved: defaultRuntimeSettings(),
+		historyRoot: root, timeLimit: -1,
+	}
+	model.markResultReady(2)
+	if model.result == nil {
+		t.Fatalf("result unavailable after completion: state=%s err=%q", session.State, model.testError)
+	}
+	originID := model.result.ID
+	model.resultReadyAtNS = sessionNow() - int64(time.Second)
+	value, load := model.Update(tea.KeyPressMsg(tea.Key{Text: "p", Code: 'p'}))
+	model = value.(appModel)
+	if load == nil || !model.practiceReview || !model.practiceLoading {
+		t.Fatalf("practice review did not start asynchronously: state=%s result=%v ready=%d now=%d review=%v loading=%v cmd=%v", model.session.State, model.result != nil, model.resultReadyAtNS, sessionNow(), model.practiceReview, model.practiceLoading, load != nil)
+	}
+	value, _ = model.Update(load())
+	model = value.(appModel)
+	if !strings.Contains(model.View().Content, "Practice") || !strings.Contains(model.View().Content, "insufficient") {
+		t.Fatalf("degraded review did not explain evidence: %q", model.View().Content)
+	}
+	value, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	model = value.(appModel)
+	if model.practiceReview || model.result == nil || model.result.ID != originID || model.session != session {
+		t.Fatalf("Escape did not preserve originating result: review=%v result=%#v", model.practiceReview, model.result)
+	}
+}
+func TestCharmPracticeReviewDismissRestoreCancelKeepsRegularHistory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "history-v1")
+	test := &Test{
+		Config:   TestConfig{Mode: wordMode, Source: wordSource, Pack: "1000en", TimeLimit: -1, WordCount: 2, WordsPerGroup: 2, Groups: 1},
+		Origin:   ResourceOrigin{Kind: "embedded-word", PackID: "1000en", Revision: strings.Repeat("b", 64), Embedded: true},
+		Segments: []segment{{Text: "alpha beta"}}, EligibleForHistory: true, EligibleForPB: true,
+	}
+	session := NewSession(test, strings.Repeat("3", 32), strings.Repeat("4", 32))
+	input := append([]rune{'x'}, []rune("lpha beta")...)
+	for i, r := range input {
+		if err := session.Apply(SessionInput{Kind: InputText, Text: string(r), AtNS: int64(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := appModel{session: session, settings: defaultRuntimeSettings(), saved: defaultRuntimeSettings(), historyRoot: root, timeLimit: -1}
+	save := model.markResultReady(sessionNow())
+	if save == nil || model.result == nil {
+		t.Fatalf("mistake result did not settle: state=%s result=%v", session.State, model.result != nil)
+	}
+	value, _ := model.Update(save())
+	model = value.(appModel)
+	model.resultReadyAtNS = sessionNow() - int64(time.Second)
+	originID := model.result.ID
+	value, load := model.Update(tea.KeyPressMsg(tea.Key{Text: "p", Code: 'p'}))
+	model = value.(appModel)
+	if load == nil || !model.practiceLoading {
+		t.Fatal("practice history read was not asynchronous")
+	}
+	value, _ = model.Update(load())
+	model = value.(appModel)
+	if model.practicePlan == nil || len(model.practicePlan.Items) == 0 {
+		t.Fatalf("mistake did not produce a practice candidate: %q", model.View().Content)
+	}
+	before := len(model.practicePlan.Items)
+	value, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: "delete"}))
+	model = value.(appModel)
+	if len(model.practicePlan.Items) != before-1 {
+		t.Fatalf("Delete did not dismiss candidate: before=%d after=%d", before, len(model.practicePlan.Items))
+	}
+	value, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: "r", Code: 'r'}))
+	model = value.(appModel)
+	if len(model.practicePlan.Items) != before {
+		t.Fatalf("r did not restore candidate: got %d want %d", len(model.practicePlan.Items), before)
+	}
+	value, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	model = value.(appModel)
+	if model.practiceReview || model.result == nil || model.result.ID != originID || model.practiceActive {
+		t.Fatalf("cancel changed regular result: review=%v result=%#v active=%v", model.practiceReview, model.result, model.practiceActive)
+	}
+	practicePage, err := ReadHistory(root, HistoryQuery{Practice: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if practicePage.Total != 0 {
+		t.Fatalf("cancel persisted practice history: %d records", practicePage.Total)
+	}
+}
+func TestCharmPracticeRestorePreservesEvidenceRanking(t *testing.T) {
+	ranked := []PracticeItem{{Item: "frequent", Reason: "error"}, {Item: "slower", Reason: "slow"}}
+	model := appModel{
+		session:           NewSession(&Test{Segments: []segment{{Text: "frequent slower"}}}, strings.Repeat("a", 32), strings.Repeat("b", 32)),
+		practiceReview:    true,
+		practicePlan:      &PracticePlan{Items: append([]PracticeItem(nil), ranked...)},
+		practiceAllItems:  append([]PracticeItem(nil), ranked...),
+		practiceDismissed: make(map[string]bool),
+	}
+	value, _ := model.Update(tea.KeyPressMsg(tea.Key{Text: "delete"}))
+	model = value.(appModel)
+	value, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: "r", Code: 'r'}))
+	model = value.(appModel)
+	if len(model.practicePlan.Items) != 2 || model.practicePlan.Items[0].Item != "frequent" ||
+		model.practicePlan.Items[1].Item != "slower" {
+		t.Fatalf("restore changed ranked curriculum: %#v", model.practicePlan.Items)
+	}
+}
+
+func TestCharmPracticeCompletesPersistsRepeatsAndEscapes(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "history-v1")
+	originTest := &Test{
+		Config:   TestConfig{Mode: wordMode, Source: wordSource, Pack: "1000en", TimeLimit: -1, WordCount: 1, WordsPerGroup: 1, Groups: 1},
+		Origin:   ResourceOrigin{Kind: "embedded-word", PackID: "1000en", Revision: "", Embedded: true},
+		Segments: []segment{{Text: "baseline"}}, EligibleForHistory: true, EligibleForPB: true,
+	}
+	originSession := NewSession(originTest, strings.Repeat("5", 32), strings.Repeat("6", 32))
+	for i, r := range []rune("baseline") {
+		if err := originSession.Apply(SessionInput{Kind: InputText, Text: string(r), AtNS: int64(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseline, err := FinishResult(originSession.Snapshot(), time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := PracticePlan{
+		ParentID: baseline.ID, Origin: originTest.Origin, SampleSessions: 2,
+		Items: []PracticeItem{{Item: "alpha", Context: "alpha", Reason: "error", Occurrences: 2, Attempts: 2, CorrectAttempts: 1, Errors: 1, CurrentOccurrences: 1, HistoryOccurrences: 1}},
+	}
+	model := appModel{
+		session: originSession, result: &baseline, settings: defaultRuntimeSettings(), saved: defaultRuntimeSettings(),
+		historyRoot: root, practiceReview: true, practicePlan: &plan,
+		practiceAllItems: append([]PracticeItem(nil), plan.Items...), practiceOriginResult: &baseline,
+		practiceOriginSession: originSession, practiceOriginTest: originTest, practiceOriginTestIndex: 0,
+		timeLimit: -1,
+	}
+	value, build := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = value.(appModel)
+	if build == nil || !model.generating {
+		t.Fatal("Enter did not schedule explicit practice start")
+	}
+	value, _ = model.Update(build())
+	model = value.(appModel)
+	if model.session == nil || !model.practiceActive || model.session.AttemptID == baseline.ID {
+		t.Fatalf("practice attempt did not start: active=%v session=%#v", model.practiceActive, model.session)
+	}
+	firstAttempt := model.session.AttemptID
+	var saveCmd tea.Cmd
+	for _, r := range []rune(model.session.prompt()) {
+		value, saveCmd = model.Update(tea.KeyPressMsg(tea.Key{Text: string(r), Code: r}))
+		model = value.(appModel)
+	}
+	if saveCmd != nil {
+		value, _ = model.Update(saveCmd())
+		model = value.(appModel)
+	}
+	if model.result == nil || !model.practiceActive || model.session.State != SessionCompleted {
+		t.Fatalf("practice completion did not produce results: state=%s result=%v", model.session.State, model.result != nil)
+	}
+	if model.historyRecord.PracticeDetail == nil || !model.historyRecord.Practice {
+		t.Fatalf("practice detail was not attached: %#v", model.historyRecord)
+	}
+	practicePage, err := ReadHistory(root, HistoryQuery{Practice: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if practicePage.Total != 1 || !practicePage.Records[0].Practice {
+		t.Fatalf("practice history projection = %#v", practicePage)
+	}
+	model.resultReadyAtNS = sessionNow() - int64(time.Second)
+	value, again := model.Update(tea.KeyPressMsg(tea.Key{Text: "p", Code: 'p'}))
+	model = value.(appModel)
+	if again == nil || !model.generating {
+		t.Fatal("practice again did not schedule a fresh attempt")
+	}
+	value, _ = model.Update(again())
+	model = value.(appModel)
+	if model.session.AttemptID == firstAttempt {
+		t.Fatal("practice again reused the completed attempt")
+	}
+	for _, r := range []rune(model.session.prompt()) {
+		value, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: string(r), Code: r}))
+		model = value.(appModel)
+	}
+	escapeModel := model
+	value, _ = escapeModel.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	escapeModel = value.(appModel)
+	if escapeModel.practiceActive || escapeModel.practiceReview || escapeModel.session != originSession || escapeModel.result.ID != baseline.ID {
+		t.Fatalf("Escape did not restore originating result: active=%v review=%v session=%p result=%v", escapeModel.practiceActive, escapeModel.practiceReview, escapeModel.session, escapeModel.result.ID)
+	}
+	value, regular := model.Update(tea.KeyPressMsg(tea.Key{Text: "n", Code: 'n'}))
+	model = value.(appModel)
+	if regular == nil || !model.generating {
+		t.Fatal("Return to regular test did not schedule fresh generation")
+	}
+	value, _ = model.Update(regular())
+	model = value.(appModel)
+	if model.practiceActive || model.session.Test == nil || model.session.Test.Config != originTest.Config {
+		t.Fatalf("regular return did not restore configuration: active=%v test=%#v", model.practiceActive, model.session.Test)
+	}
+}

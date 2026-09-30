@@ -1,6 +1,6 @@
 # Plan 004: Review and practice measured weaknesses
 
-Status: proposed implementation specification. No feature in this document is implemented by the act of writing it. Source: [PRD](../../PRD.md). Planning baseline: 2026-09-26 working tree, including existing uncommitted `src/test.go`, `src/test_test.go`, and `src/tt.go` changes. Reinspect those files before implementation and preserve unrelated work.
+Status: completed implementation record (2026-10-01). Source: [PRD](../../PRD.md). Implemented in `src/practice.go`, `src/history.go`, `src/app.go`, behavioral tests, README/manual, and generated manual output. The planning baseline was the 2026-09-26 working tree; the current Charm CLI still accepts word tests only, while quote-context selection is covered at the model seam.
 
 ## Goal and user job
 
@@ -136,8 +136,8 @@ Release, deployment, publishing binaries, and uploading user data require separa
 
 ## Definition of done
 
-- [ ] AC-1: Known error/slow fixtures select the documented ranked items, explain their evidence, and generate exactly 25 words with a 15:10 weak-to-neutral slot ratio.
-- [ ] AC-2: Cancelling review records no test and leaves the prior result/configuration unchanged. A private test without retention has no extracted word candidates.
-- [ ] AC-3: A completed practice record is `practice=true`, is PB-ineligible, and appears only in the practice History view by default.
-- [ ] AC-4: Comparison shows null/unavailable speed when either baseline or drill has fewer than 3 complete item occurrences; it never claims improvement from one sparse sample.
-- [ ] AC-5: Practice again generates a new attempt; dismiss/repeat/return routes work entirely by keyboard.
+- [x] AC-1: Known error/slow fixtures select the documented ranked items, explain their evidence, and generate exactly 25 words with a 15:10 weak-to-neutral slot ratio.
+- [x] AC-2: Cancelling review records no test and leaves the prior result/configuration unchanged. A private test without retention has no extracted word candidates.
+- [x] AC-3: A completed practice record is `practice=true`, is PB-ineligible, and appears only in the practice History view by default.
+- [x] AC-4: Comparison shows null/unavailable speed when either baseline or drill has fewer than 3 complete item occurrences; it never claims improvement from one sparse sample.
+- [x] AC-5: Practice again generates a new attempt; dismiss/repeat/return routes work entirely by keyboard.

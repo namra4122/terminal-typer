@@ -98,7 +98,7 @@ func TestHistoryProjectionRetainsBoundedPublicFragments(t *testing.T) {
 		ID: strings.Repeat("d", 32), PromptID: strings.Repeat("e", 32), MetricVersion: metricVersion,
 		FinishedUnixMS: 10, Config: TestConfig{Mode: wordMode, Source: wordSource, Pack: "1000en", TimeLimit: -1, WordCount: 3, WordsPerGroup: 3, Groups: 1},
 		Outcome: "completed", Prompt: prompt, Measurements: Measurements{
-			Words: []WordObservation{{Start: 0, End: 5, Errors: 2, Attempts: 3, CorrectAttempts: 1}, {Start: 6, End: 10}, {Start: 11, End: 16}},
+			Words: []WordObservation{{Start: 0, End: 5, Errors: 2, Attempts: 3, CorrectAttempts: 1, ActiveMS: 100, Complete: true}, {Start: 6, End: 10}, {Start: 11, End: 16}},
 		}, EligibilityReasons: []string{},
 	}
 	record := ProjectHistory(result, ResourceOrigin{Kind: "embedded-word", PackID: "1000en", Revision: strings.Repeat("f", 64), Embedded: true}, PrivacyPolicy{})
@@ -112,9 +112,182 @@ func TestHistoryProjectionRetainsBoundedPublicFragments(t *testing.T) {
 	}
 
 	result.Prompt = "alpha"
-	result.Measurements.Words = []WordObservation{{Start: 0, End: 5, Errors: 1}}
+	result.Measurements.Words = []WordObservation{{Start: 0, End: 5, Errors: 1, ActiveMS: 20, Complete: true}}
 	if short := ProjectHistory(result, ResourceOrigin{Kind: "embedded-word", PackID: "1000en", Revision: "rev", Embedded: true}, PrivacyPolicy{}); len(short.Fragments) != 0 {
 		t.Fatalf("complete short prompt retained: %#v", short.Fragments)
+	}
+}
+
+func TestHistoryProjectionRetainsCompleteCorrectAndErrorObservations(t *testing.T) {
+	prompt := "alpha beta gamma delta"
+	result := SessionResult{
+		ID: strings.Repeat("1", 32), PromptID: strings.Repeat("2", 32), MetricVersion: metricVersion,
+		FinishedUnixMS: 10, Config: TestConfig{Mode: wordMode, Source: wordSource, Pack: "1000en", TimeLimit: -1, WordCount: 4, WordsPerGroup: 4, Groups: 1},
+		Outcome: "completed", Prompt: prompt, Measurements: Measurements{Words: []WordObservation{
+			{Start: 0, End: 5, ActiveMS: 120, Attempts: 2, CorrectAttempts: 1, Errors: 1, Complete: true},
+			{Start: 6, End: 10, ActiveMS: 900, Attempts: 1, CorrectAttempts: 1, Complete: true},
+			{Start: 11, End: 16, ActiveMS: 0, Complete: false},
+		}}, EligibilityReasons: []string{},
+	}
+	record := ProjectHistory(result, ResourceOrigin{Kind: "embedded-word", PackID: "1000en", Revision: strings.Repeat("3", 64), Embedded: true}, PrivacyPolicy{})
+	if len(record.Fragments) != 2 {
+		t.Fatalf("fragments = %#v", record.Fragments)
+	}
+	var alpha, beta HistoryFragment
+	for _, fragment := range record.Fragments {
+		switch fragment.Item {
+		case "alpha":
+			alpha = fragment
+		case "beta":
+			beta = fragment
+		}
+	}
+	if alpha.Occurrences != 1 || len(alpha.Observations) != 1 || alpha.Observations[0].Scalars != 5 ||
+		alpha.Observations[0].Errors != 1 {
+		t.Fatalf("error observation = %#v", alpha)
+	}
+	if beta.Occurrences != 1 || len(beta.Observations) != 1 || beta.Errors != 0 ||
+		beta.Observations[0].ActiveMS != 900 {
+		t.Fatalf("correct slow observation = %#v", beta)
+	}
+}
+
+func TestHistoryProjectionBoundsQuoteContext(t *testing.T) {
+	prompt := "one, two three four five six"
+	start := strings.Index(prompt, "three")
+	result := SessionResult{
+		ID: strings.Repeat("4", 32), PromptID: strings.Repeat("5", 32), MetricVersion: metricVersion,
+		FinishedUnixMS: 10, Config: TestConfig{Mode: quoteMode, Source: quoteSource, Pack: "quotes", TimeLimit: -1},
+		Outcome: "completed", Prompt: prompt, Measurements: Measurements{Words: []WordObservation{{
+			Start: start, End: start + len("three"), ActiveMS: 250, Attempts: 1, CorrectAttempts: 1, Complete: true,
+		}}}, EligibilityReasons: []string{},
+	}
+	record := ProjectHistory(result, ResourceOrigin{Kind: "embedded-quote", PackID: "quotes", Revision: strings.Repeat("6", 64), Embedded: true}, PrivacyPolicy{})
+	if len(record.Fragments) != 1 {
+		t.Fatalf("fragments = %#v", record.Fragments)
+	}
+	context := record.Fragments[0].Context
+	if context == "" || len(strings.Fields(context)) > 5 || !strings.Contains(context, "three") || !strings.Contains(context, "one,") {
+		t.Fatalf("bounded quote context = %q", context)
+	}
+}
+
+func TestHistoryProjectionDoesNotRetainWholeShortQuoteContext(t *testing.T) {
+	prompt := "one two three four five"
+	result := SessionResult{
+		ID: strings.Repeat("0", 32), PromptID: strings.Repeat("1", 32), MetricVersion: metricVersion,
+		FinishedUnixMS: 10, Config: TestConfig{Mode: quoteMode, Source: quoteSource, Pack: "quotes", TimeLimit: -1},
+		Outcome: "completed", Prompt: prompt, Measurements: Measurements{Words: []WordObservation{{
+			Start: 8, End: 13, ActiveMS: 100, Attempts: 1, CorrectAttempts: 1, Complete: true,
+		}}}, EligibilityReasons: []string{},
+	}
+	record := ProjectHistory(result, ResourceOrigin{Kind: "embedded-quote", PackID: "quotes", Revision: strings.Repeat("2", 64), Embedded: true}, PrivacyPolicy{})
+	if len(record.Fragments) != 0 {
+		t.Fatalf("short quote context retained whole prompt: %#v", record.Fragments)
+	}
+}
+
+func TestHistoryPracticeDetailPersistsOnlyInPracticeQuery(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "history-v1")
+	record := historyFixture(strings.Repeat("7", 32), 10)
+	record.Mode = "practice"
+	record.SourceKind = "embedded-word"
+	record.SourceLabel = "1000en"
+	record.PackID = "1000en"
+	record.PackRevision = strings.Repeat("8", 64)
+	record.Privacy = "public"
+	record.Practice = true
+	median := 12.5
+	record.PracticeDetail = &PracticeDetail{
+		ParentID: strings.Repeat("9", 32), WindowStartUnixMS: 1, SampleSessions: 2,
+		Items:       []PracticeItem{{Item: "alpha", Context: "", Occurrences: 3, Attempts: 3, CorrectAttempts: 2, Errors: 1, MedianMSPerScalar: &median, CurrentOccurrences: 1, HistoryOccurrences: 2}},
+		Comparisons: []PracticeComparison{{Item: "alpha", Baseline: PracticeItem{Item: "alpha"}, Drill: PracticeItem{Item: "alpha"}}},
+	}
+	if err := SaveHistory(root, record); err != nil {
+		t.Fatal(err)
+	}
+	regular, err := ReadHistory(root, HistoryQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regular.Total != 0 {
+		t.Fatalf("regular history included practice: %#v", regular)
+	}
+	practice, err := ReadHistory(root, HistoryQuery{Practice: true})
+	if err != nil || practice.Total != 1 || practice.Records[0].PracticeDetail == nil ||
+		practice.Records[0].PracticeDetail.Items[0].Item != "alpha" {
+		t.Fatalf("practice history = %#v, %v", practice, err)
+	}
+	index, err := os.ReadFile(filepath.Join(root, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(index), "practiceDetail") {
+		t.Fatalf("index retained practice detail: %s", index)
+	}
+	sessionData, err := os.ReadFile(filepath.Join(root, "sessions", record.ID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sessionData), `"practiceDetail"`) ||
+		!strings.Contains(string(sessionData), `"parentId"`) ||
+		strings.Contains(string(sessionData), `"ParentID"`) {
+		t.Fatalf("practice detail JSON keys = %s", sessionData)
+	}
+}
+
+func TestHistoryRejectsInvalidPracticeNestedObservations(t *testing.T) {
+	record := historyFixture(strings.Repeat("a", 32), 10)
+	record.SourceKind = "embedded-word"
+	record.SourceLabel = "1000en"
+	record.PackID = "1000en"
+	record.PackRevision = strings.Repeat("b", 64)
+	record.Privacy = "public"
+	record.Fragments = []HistoryFragment{{
+		Item: "alpha", Kind: "word", Occurrences: 1, Attempts: 1, CorrectAttempts: 1,
+		Observations: []HistoryOccurrence{{ActiveMS: -1, Scalars: 5, Attempts: 1, CorrectAttempts: 1}},
+	}}
+	if err := SaveHistory(filepath.Join(t.TempDir(), "history-v1"), record); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("invalid nested observation write = %v", err)
+	}
+}
+
+func TestHistoryRejectsPrivatePracticeDetail(t *testing.T) {
+	record := historyFixture(strings.Repeat("f", 32), 10)
+	record.Practice = true
+	record.Mode = "practice"
+	record.PracticeDetail = &PracticeDetail{
+		ParentID: strings.Repeat("1", 32), Items: []PracticeItem{{Item: "secret"}},
+		Comparisons: []PracticeComparison{},
+	}
+	if err := SaveHistory(filepath.Join(t.TempDir(), "history-v1"), record); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("private practice detail write = %v", err)
+	}
+}
+
+func TestHistoryProjectionCapsOccurrencesPerItem(t *testing.T) {
+	words := make([]string, 0, 56)
+	observations := make([]WordObservation, 0, 55)
+	offset := 0
+	for i := range 55 {
+		words = append(words, "alpha")
+		observations = append(observations, WordObservation{
+			Start: offset, End: offset + len("alpha"), ActiveMS: int64(i + 1),
+			Attempts: 1, CorrectAttempts: 1, Complete: true,
+		})
+		offset += len("alpha") + 1
+	}
+	words = append(words, "omega")
+	result := SessionResult{
+		ID: strings.Repeat("c", 32), PromptID: strings.Repeat("d", 32), MetricVersion: metricVersion,
+		FinishedUnixMS: 10, Config: TestConfig{Mode: wordMode, Source: wordSource, Pack: "1000en", TimeLimit: -1},
+		Outcome: "completed", Prompt: strings.Join(words, " "), Measurements: Measurements{Words: observations},
+		EligibilityReasons: []string{},
+	}
+	record := ProjectHistory(result, ResourceOrigin{Kind: "embedded-word", PackID: "1000en", Revision: strings.Repeat("e", 64), Embedded: true}, PrivacyPolicy{})
+	if len(record.Fragments) != 1 || len(record.Fragments[0].Observations) != 50 ||
+		record.Fragments[0].Observations[0].ActiveMS != 6 || record.Fragments[0].Observations[49].ActiveMS != 55 {
+		t.Fatalf("bounded observations = %#v", record.Fragments)
 	}
 }
 
@@ -334,6 +507,48 @@ func TestHistoryPaginatesAndSeparatesPractice(t *testing.T) {
 	if first.Total != 27 || len(first.Records) != 25 || len(second.Records) != 2 ||
 		first.Records[0].FinishedUnixMS != 26 || practicePage.Total != 1 || practicePage.Records[0].ID != practice.ID {
 		t.Fatalf("pages = first %#v, second %#v, practice %#v", first, second, practicePage)
+	}
+}
+
+func TestHistoryPracticeWindowPagesMatchingPackBeforeLimit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "history-v1")
+	match := historyFixture(strings.Repeat("a", 32), 1)
+	match.Privacy, match.SourceKind, match.SourceLabel = "public", "embedded-word", "1000en"
+	match.PackID, match.PackRevision = "1000en", strings.Repeat("b", 64)
+	if err := SaveHistory(root, match); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 21; i++ {
+		other := historyFixture(fmt.Sprintf("%032x", i+1), int64(i+2))
+		if err := SaveHistory(root, other); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := ReadHistory(root, HistoryQuery{Limit: 20, PackID: "1000en", PackRevision: strings.Repeat("b", 64), Mode: "words"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Records) != 1 || page.Records[0].ID != match.ID {
+		t.Fatalf("matching history after unrelated results: %#v", page)
+	}
+}
+
+func TestHistoryReadsExistingPracticeRetryWithPublicMistakeFragment(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "history-v1")
+	retry := historyFixture(strings.Repeat("c", 32), 1)
+	retry.Privacy, retry.SourceKind, retry.SourceLabel = "public", "embedded-word", "1000en"
+	retry.PackID, retry.PackRevision = "1000en", strings.Repeat("d", 64)
+	retry.Practice = true
+	retry.Fragments = []HistoryFragment{{Item: "mistyped", Kind: "word", Occurrences: 1, Attempts: 2, CorrectAttempts: 1, Errors: 1}}
+	if err := SaveHistory(root, retry); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHistory(root, historyFixture(strings.Repeat("e", 32), 2)); err != nil {
+		t.Fatalf("legacy retry blocked subsequent saves: %v", err)
+	}
+	page, err := ReadHistory(root, HistoryQuery{Practice: true})
+	if err != nil || page.Total != 1 || page.Records[0].Fragments[0].Item != "mistyped" {
+		t.Fatalf("legacy practice history = %#v, %v", page, err)
 	}
 }
 

@@ -38,6 +38,20 @@ usage: tt \[OPTION\]... \[FILE\]
   JSON/CSV schemas are unchanged. Consistency uses active-time interval raw-WPM
   rates, which can differ from final retained-character speeds.
 
+  On regular Charm Results, **p** opens a keyboard-only review of measured
+  weak words and their recent sample when suitable embedded-word evidence
+  exists. **up**/**down** select an item; **delete** dismisses it, **r**
+  restores it, **enter** starts a 25-word drill, and **esc** cancels without
+  recording a test. The drill mixes 15 weak-word slots with 10 neutral words
+  from the matching embedded word list. Completed practice is PB-ineligible
+  and appears only in practice History by default. Per-item accuracy, error
+  rate, and median time per Unicode scalar are compared with the baseline;
+  speed change is unavailable if either side has fewer than three complete
+  occurrences. On practice Results, **a** starts a fresh shuffle of the
+  same curriculum, **n** starts a fresh regular test with the previous
+  configuration, and **esc** restores the originating result. The Charm CLI
+  currently accepts word tests only; quote tests use the original renderer.
+
 
 # OPTIONS
 
@@ -242,8 +256,9 @@ Modify to taste.
   **$XDG_DATA_HOME/tt/history-v1**, or
   **~/.local/share/tt/history-v1** when **$XDG_DATA_HOME** is unset. Each
   authoritative session is a versioned JSON file; **index.json** is a
-  rebuildable cache. Embedded prompts may retain bounded mistake fragments.
-  Local word lists, files, stdin, complete prompts, complete typed responses,
+  rebuildable cache. Embedded prompts may retain bounded word occurrence
+  summaries for practice. Private file, stdin, and local word-list input
+  contributes no word candidates. Complete prompts, complete typed responses,
   raw input events, and source paths are not retained in rich History.
   Malformed authoritative data is reported with its exact path and is not
   rewritten. If **.write-lock** remains after a crash, verify no tt writer is
@@ -262,6 +277,12 @@ Modify to taste.
   **h: ** Opens History from Results. In History, **up**/**down** select,
   **left**/**right** page, **t** toggles regular/practice, and **esc** returns
   to the same result.\
+  **p: ** Reviews weaknesses on regular Charm Results if suitable evidence
+  exists; unavailable states show a reason and sample size.\
+  **delete: ** Dismisses the selected review item; **r** restores it.\
+  **enter: ** Starts a reviewed practice drill. On practice Results, **a**
+  starts a fresh drill, **n** returns to a fresh regular test, and **esc**
+  restores the originating result.\
   **enter: ** Starts the next test from the Results screen.\
   **right** Move to the next test.\
   **left** Move to the previous test.

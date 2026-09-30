@@ -49,49 +49,85 @@ type historyLoadedMsg struct {
 	err       error
 }
 type historyExitTimeoutMsg struct{}
+type practiceHistoryLoadedMsg struct {
+	requestID uint64
+	page      HistoryPage
+	err       error
+}
+type practiceReadyMsg struct {
+	test                *Test
+	attemptID, promptID string
+	err                 error
+}
+type practicePreflightMsg struct {
+	requestID uint64
+	err       error
+}
 type appModel struct {
-	session             *Session
-	width, height       int
-	settings            runtimeSettings
-	saved               runtimeSettings
-	draftSettings       runtimeSettings
-	overrides           settingsOverrides
-	flags               flagValues
-	settingsOpen        bool
-	selected            int
-	meaningful          bool
-	processedEventCount int
-	textInputCount      int
-	restartPending      bool
-	tooSmall            bool
-	timeLimit           time.Duration
-	quitting            bool
-	dirty               map[int]bool
-	message             string
-	tests               []*testEntry
-	testIndex           int
-	generateTest        func() *Test
-	attempts            map[string]string
-	generating          bool
-	testError           string
-	savingSettings      bool
-	resultReadyAtNS     int64
-	result              *SessionResult
-	historyRoot         string
-	historyRecord       HistoryRecord
-	saveState           SaveState
-	saveError           string
-	historyOpen         bool
-	historyLoading      bool
-	historyPractice     bool
-	historyOffset       int
-	historySelected     int
-	historyPage         HistoryPage
-	historyError        string
-	exitRequested       bool
-	historyRequestID    uint64
-	pendingHistory      map[string]HistoryRecord
-	backgroundSaveError string
+	session                     *Session
+	width, height               int
+	settings                    runtimeSettings
+	saved                       runtimeSettings
+	draftSettings               runtimeSettings
+	overrides                   settingsOverrides
+	flags                       flagValues
+	settingsOpen                bool
+	selected                    int
+	meaningful                  bool
+	processedEventCount         int
+	textInputCount              int
+	restartPending              bool
+	tooSmall                    bool
+	timeLimit                   time.Duration
+	quitting                    bool
+	dirty                       map[int]bool
+	message                     string
+	tests                       []*testEntry
+	testIndex                   int
+	generateTest                func() *Test
+	attempts                    map[string]string
+	generating                  bool
+	testError                   string
+	savingSettings              bool
+	resultReadyAtNS             int64
+	result                      *SessionResult
+	historyRoot                 string
+	historyRecord               HistoryRecord
+	saveState                   SaveState
+	saveError                   string
+	historyOpen                 bool
+	historyLoading              bool
+	historyPractice             bool
+	historyOffset               int
+	historySelected             int
+	historyPage                 HistoryPage
+	historyError                string
+	exitRequested               bool
+	historyRequestID            uint64
+	pendingHistory              map[string]HistoryRecord
+	backgroundSaveError         string
+	practiceReview              bool
+	practiceLoading             bool
+	practiceError               string
+	practicePreflightLoading    bool
+	practicePreflightError      string
+	practiceHistorySampleCount  int
+	practiceHistoryError        string
+	practiceRequestID           uint64
+	practiceSelected            int
+	practiceDismissed           map[string]bool
+	practiceAllItems            []PracticeItem
+	practicePlan                *PracticePlan
+	practiceActive              bool
+	practiceOriginResult        *SessionResult
+	practiceOriginSession       *Session
+	practiceOriginTest          *Test
+	practiceOriginHistoryRecord HistoryRecord
+	practiceOriginSaveState     SaveState
+	practiceOriginSaveError     string
+	practiceOriginTestIndex     int
+	practiceComparisons         []PracticeComparison
+	practiceReturning           bool
 }
 type appTick time.Time
 
@@ -139,6 +175,82 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.historyError = ""
 		}
 		return m, nil
+	case practiceHistoryLoadedMsg:
+		if !m.practiceReview || v.requestID != m.practiceRequestID {
+			return m, nil
+		}
+		m.practiceLoading = false
+		m.practiceHistoryError = ""
+		m.practiceHistorySampleCount = len(v.page.Records)
+		if v.err != nil {
+			m.practiceHistoryError = v.err.Error()
+		}
+		if m.practiceOriginResult == nil {
+			m.practiceError = "The originating result is unavailable."
+			return m, nil
+		}
+		recent := v.page.Records
+		if m.practiceOriginTest != nil && m.practiceOriginTest.Origin.Revision != "" {
+			filtered := make([]HistoryRecord, 0, len(recent))
+			for _, record := range recent {
+				if record.PackRevision == m.practiceOriginTest.Origin.Revision {
+					filtered = append(filtered, record)
+				}
+			}
+			recent = filtered
+		}
+		plan, err := SelectPractice(*m.practiceOriginResult, recent)
+		if err != nil {
+			m.practicePlan = nil
+			m.practiceAllItems = nil
+			m.practiceError = err.Error()
+			return m, nil
+		}
+		if m.practiceOriginTest != nil {
+			plan.Origin = m.practiceOriginTest.Origin
+		}
+		m.practicePlan = &plan
+		m.practiceAllItems = append([]PracticeItem(nil), plan.Items...)
+		m.practiceDismissed = make(map[string]bool)
+		m.practiceSelected = 0
+		m.practiceError = ""
+		m.practicePreflightError = ""
+		m.practicePreflightLoading = true
+		return m, m.preflightPractice()
+	case practicePreflightMsg:
+		if !m.practiceReview || v.requestID != m.practiceRequestID {
+			return m, nil
+		}
+		m.practicePreflightLoading = false
+		if v.err != nil {
+			m.practicePreflightError = v.err.Error()
+		} else {
+			m.practicePreflightError = ""
+		}
+		return m, nil
+	case practiceReadyMsg:
+		m.generating = false
+		if v.err != nil {
+			m.practiceError = v.err.Error()
+			m.practiceReview = true
+			return m, nil
+		}
+		if v.test == nil {
+			m.practiceError = "Practice did not produce a test."
+			m.practiceReview = true
+			return m, nil
+		}
+		attemptID, promptID := v.attemptID, v.promptID
+		m.tests = append(m.tests, &testEntry{test: v.test, promptID: promptID})
+		m.testIndex = len(m.tests) - 1
+		m.practiceReview = false
+		m.practiceLoading = false
+		m.practiceActive = true
+		m.practiceError = ""
+		if err := m.activateTest(attemptID); err != nil {
+			m.testError = err.Error()
+		}
+		return m, nil
 	case historyExitTimeoutMsg:
 		if len(m.pendingHistory) > 0 {
 			if _, currentPending := m.pendingHistory[m.historyRecord.ID]; currentPending {
@@ -168,8 +280,22 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case testReadyMsg:
 		m.generating = false
 		if v.err != nil {
+			m.practiceReturning = false
 			m.testError = v.err.Error()
 			return m, nil
+		}
+		if m.practiceReturning {
+			m.practiceReturning = false
+			m.practiceActive = false
+			m.practiceReview = false
+			m.practicePlan = nil
+			m.practiceOriginResult = nil
+			m.practiceOriginSession = nil
+			m.practiceComparisons = nil
+			m.practiceOriginTest = nil
+			if m.practiceOriginTestIndex >= 0 && m.practiceOriginTestIndex < len(m.tests) {
+				m.tests = m.tests[:m.practiceOriginTestIndex+1]
+			}
 		}
 		m.tests = append(m.tests, &testEntry{test: v.test, promptID: v.promptID})
 		m.testIndex = len(m.tests) - 1
@@ -243,6 +369,22 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.historyOffset += 25
 					return m, m.loadHistory()
 				}
+			}
+			return m, nil
+		}
+		if m.practiceReview {
+			return m, m.updatePracticeReview(key, now)
+		}
+		if m.practiceActive && (m.session.State == SessionCompleted || m.session.State == SessionExpired) {
+			switch key {
+			case "esc", "escape":
+				m.restorePracticeOrigin()
+				return m, nil
+			case "p", "a":
+				m.practiceReview = false
+				return m, m.startPracticeAttempt()
+			case "n", "q":
+				return m, m.returnToRegular()
 			}
 			return m, nil
 		}
@@ -342,6 +484,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historySelected = 0
 				return m, m.loadHistory()
 			}
+		case "p":
+			if !m.settingsOpen && (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.result != nil && !m.practiceActive {
+				return m, m.beginPracticeReview()
+			}
 		case "s":
 			_, stillPending := m.pendingHistory[m.historyRecord.ID]
 			if !m.settingsOpen && !stillPending && (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.saveState == SaveFailed {
@@ -399,6 +545,277 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *appModel) beginPracticeReview() tea.Cmd {
+	m.practiceOriginResult = m.result
+	m.practiceOriginSession = m.session
+	if m.session != nil {
+		m.practiceOriginTest = m.session.Test
+	}
+	m.practiceOriginHistoryRecord = m.historyRecord
+	m.practiceOriginSaveState = m.saveState
+	m.practiceOriginSaveError = m.saveError
+	m.practiceOriginTestIndex = m.testIndex
+	m.practiceReview = true
+	m.practiceLoading = false
+	m.practicePreflightLoading = false
+	m.practicePreflightError = ""
+	m.practiceHistorySampleCount = 0
+	m.practiceError = ""
+	m.practiceHistoryError = ""
+	m.practicePlan = nil
+	m.practiceAllItems = nil
+	m.practiceSelected = 0
+	m.practiceDismissed = make(map[string]bool)
+	if m.session == nil || m.session.Test == nil ||
+		!m.session.Test.Origin.Embedded ||
+		(m.session.Test.Origin.Kind != "embedded-word" && m.session.Test.Origin.Kind != "embedded-quote") {
+		m.practiceError = ErrInsufficientEvidence.Error()
+		return nil
+	}
+	m.practiceLoading = true
+	m.practiceRequestID++
+	requestID := m.practiceRequestID
+	root := m.historyRoot
+	origin := m.session.Test.Origin
+	mode := string(m.result.Config.Mode)
+	return func() tea.Msg {
+		page, err := ReadHistory(root, HistoryQuery{
+			Practice: false, Limit: 20, PackID: origin.PackID,
+			PackRevision: origin.Revision, Mode: mode,
+		})
+		return practiceHistoryLoadedMsg{requestID: requestID, page: page, err: err}
+	}
+}
+
+func (m *appModel) updatePracticeReview(key string, now int64) tea.Cmd {
+	switch key {
+	case "ctrl+c":
+		return m.requestQuit()
+	case "esc", "escape":
+		m.practiceReview = false
+		m.practiceLoading = false
+		m.practicePreflightLoading = false
+		m.practicePreflightError = ""
+		m.practiceHistorySampleCount = 0
+		m.practicePlan = nil
+		m.practiceError = ""
+		m.practiceHistoryError = ""
+		return nil
+	case "up":
+		if m.practiceSelected > 0 {
+			m.practiceSelected--
+		}
+	case "down":
+		if m.practicePlan != nil && m.practiceSelected+1 < len(m.practicePlan.Items) {
+			m.practiceSelected++
+		}
+	case "delete", "backspace":
+		if m.practicePlan != nil && len(m.practicePlan.Items) > 0 && m.practiceSelected < len(m.practicePlan.Items) {
+			item := m.practicePlan.Items[m.practiceSelected]
+			m.practiceDismissed[item.Item] = true
+			m.practicePlan.Items = append(m.practicePlan.Items[:m.practiceSelected], m.practicePlan.Items[m.practiceSelected+1:]...)
+			if m.practiceSelected >= len(m.practicePlan.Items) {
+				m.practiceSelected = len(m.practicePlan.Items) - 1
+			}
+		}
+	case "r":
+		if m.practicePlan != nil {
+			for _, item := range m.practiceAllItems {
+				if !m.practiceDismissed[item.Item] {
+					continue
+				}
+				delete(m.practiceDismissed, item.Item)
+				m.practicePlan.Items = m.practicePlan.Items[:0]
+				for _, ranked := range m.practiceAllItems {
+					if !m.practiceDismissed[ranked.Item] {
+						m.practicePlan.Items = append(m.practicePlan.Items, ranked)
+					}
+				}
+				for i, active := range m.practicePlan.Items {
+					if active.Item == item.Item {
+						m.practiceSelected = i
+						break
+					}
+				}
+				break
+			}
+		}
+	case "enter":
+		if m.practicePreflightLoading {
+			return nil
+		}
+		if m.practicePreflightError != "" {
+			m.practiceError = m.practicePreflightError
+			return nil
+		}
+		if m.practicePlan != nil && len(m.practicePlan.Items) > 0 {
+			return m.startPracticeAttempt()
+		}
+	}
+	_ = now
+	return nil
+}
+
+func (m *appModel) preflightPractice() tea.Cmd {
+	if m.practicePlan == nil {
+		return nil
+	}
+	plan := *m.practicePlan
+	plan.Items = append([]PracticeItem(nil), m.practicePlan.Items...)
+	origin := m.practiceOriginTest
+	neutralPack := "1000en"
+	expectedRevision := ""
+	if origin != nil {
+		if origin.Config.Source == quoteSource {
+			if origin.Config.Pack != "en" {
+				return func() tea.Msg {
+					return practicePreflightMsg{requestID: m.practiceRequestID, err: ErrNoNeutralPack}
+				}
+			}
+		} else if origin.Config.Source == wordSource {
+			neutralPack = origin.Config.Pack
+			expectedRevision = origin.Origin.Revision
+		}
+		plan.Origin = origin.Origin
+	}
+	requestID := m.practiceRequestID
+	return func() tea.Msg {
+		data, resolved, err := ResolveResource("words", neutralPack)
+		if err != nil || !resolved.Embedded || resolved.PackID != neutralPack ||
+			(expectedRevision != "" && resolved.Revision != expectedRevision) {
+			if err == nil {
+				err = ErrNoNeutralPack
+			}
+			return practicePreflightMsg{requestID: requestID, err: fmt.Errorf("%w: %v", ErrNoNeutralPack, err)}
+		}
+		_, err = BuildPractice(plan, strings.Fields(string(data)), 0)
+		return practicePreflightMsg{requestID: requestID, err: err}
+	}
+}
+
+func (m *appModel) startPracticeAttempt() tea.Cmd {
+	if m.practicePlan == nil || len(m.practicePlan.Items) == 0 {
+		m.practiceError = ErrInsufficientEvidence.Error()
+		m.practiceReview = true
+		return nil
+	}
+	plan := *m.practicePlan
+	plan.Items = append([]PracticeItem(nil), m.practicePlan.Items...)
+	neutralPack := "1000en"
+	if m.practiceOriginTest != nil && m.practiceOriginTest.Config.Source == wordSource {
+		neutralPack = m.practiceOriginTest.Config.Pack
+	}
+	if m.practiceOriginTest == nil && m.practiceOriginSession != nil {
+		m.practiceOriginTest = m.practiceOriginSession.Test
+	}
+	origin := m.practiceOriginTest
+	if origin == nil && m.practiceOriginSession != nil {
+		origin = m.practiceOriginSession.Test
+	}
+	if origin != nil && origin.Config.Source == wordSource {
+		neutralPack = origin.Config.Pack
+	}
+	expectedRevision := ""
+	if origin != nil && origin.Config.Source == wordSource {
+		expectedRevision = origin.Origin.Revision
+	}
+	if origin != nil && origin.Config.Source == quoteSource && origin.Config.Pack != "en" {
+		m.practiceError = ErrNoNeutralPack.Error()
+		m.practiceReview = true
+		return nil
+	}
+	m.generating = true
+	m.practiceReview = false
+	return func() tea.Msg {
+		data, resolved, err := ResolveResource("words", neutralPack)
+		if err != nil || !resolved.Embedded || resolved.PackID != neutralPack || (expectedRevision != "" && resolved.Revision != expectedRevision) {
+			if err == nil {
+				err = ErrNoNeutralPack
+			}
+			return practiceReadyMsg{err: fmt.Errorf("%w: %v", ErrNoNeutralPack, err)}
+		}
+		if len(data) == 0 {
+			return practiceReadyMsg{err: ErrNoNeutralPack}
+		}
+		test, err := BuildPractice(plan, strings.Fields(string(data)), time.Now().UnixNano())
+		if err != nil {
+			return practiceReadyMsg{err: err}
+		}
+		attemptID, err := newSessionID()
+		if err != nil {
+			return practiceReadyMsg{err: err}
+		}
+		promptID, err := newSessionID()
+		if err != nil {
+			return practiceReadyMsg{err: err}
+		}
+		return practiceReadyMsg{test: test, attemptID: attemptID, promptID: promptID}
+	}
+}
+
+func (m *appModel) restorePracticeOrigin() {
+	if m.practiceOriginSession != nil {
+		m.session = m.practiceOriginSession
+	}
+	if m.practiceOriginResult != nil {
+		m.result = m.practiceOriginResult
+	}
+	if m.practiceOriginTestIndex >= 0 && m.practiceOriginTestIndex < len(m.tests) {
+		m.tests = m.tests[:m.practiceOriginTestIndex+1]
+		m.testIndex = m.practiceOriginTestIndex
+	}
+	if m.practiceOriginResult != nil {
+		m.historyRecord = m.practiceOriginHistoryRecord
+		m.saveState = m.practiceOriginSaveState
+		m.saveError = m.practiceOriginSaveError
+	}
+	m.practiceActive = false
+	m.practiceReview = false
+	m.practiceLoading = false
+	m.practicePlan = nil
+	m.practiceOriginResult = nil
+	m.practiceOriginSession = nil
+	m.practiceOriginTest = nil
+	m.practiceComparisons = nil
+}
+
+func (m *appModel) returnToRegular() tea.Cmd {
+	origin := m.practiceOriginTest
+	if origin == nil && m.practiceOriginSession != nil {
+		origin = m.practiceOriginSession.Test
+	}
+	if origin == nil {
+		m.practiceError = "The originating regular test is unavailable."
+		return nil
+	}
+	cfg := origin.Config
+	m.practiceReturning = true
+	m.generating = true
+	return func() tea.Msg {
+		typ, name := "words", cfg.Pack
+		if cfg.Source == quoteSource {
+			typ = "quotes"
+		}
+		if _, _, err := ResolveResource(typ, name); err != nil {
+			return testReadyMsg{err: fmt.Errorf("unable to restore regular test: %w", err)}
+		}
+		generate := newTestGenerator(cfg, nil)
+		test := generate()
+		if test == nil {
+			return testReadyMsg{err: fmt.Errorf("unable to generate a fresh regular test")}
+		}
+		attemptID, err := newSessionID()
+		if err != nil {
+			return testReadyMsg{err: err}
+		}
+		promptID, err := newSessionID()
+		if err != nil {
+			return testReadyMsg{err: err}
+		}
+		return testReadyMsg{test: test, attemptID: attemptID, promptID: promptID}
+	}
+}
+
 func (m *appModel) refreshMeaningful() {
 	events := m.session.Events
 	for i := m.processedEventCount; i < len(events); i++ {
@@ -427,8 +844,20 @@ func (m *appModel) markResultReady(now int64) tea.Cmd {
 		result, err := FinishResult(m.session.Snapshot(), time.Now().UTC().UnixMilli())
 		if err == nil {
 			m.result = &result
+			if m.practiceActive && m.practicePlan != nil {
+				m.practiceComparisons = ComparePractice(*m.practicePlan, result)
+			}
 			if m.historyRoot != "" && m.session.Test != nil && m.session.Test.EligibleForHistory {
 				m.historyRecord = ProjectHistory(result, m.session.Test.Origin, PrivacyPolicy{})
+				if m.practiceActive && m.practicePlan != nil {
+					m.historyRecord.PracticeDetail = &PracticeDetail{
+						ParentID:          m.practicePlan.ParentID,
+						WindowStartUnixMS: m.practicePlan.WindowStartUnixMS,
+						SampleSessions:    m.practicePlan.SampleSessions,
+						Items:             append([]PracticeItem(nil), m.practicePlan.Items...),
+						Comparisons:       append([]PracticeComparison(nil), m.practiceComparisons...),
+					}
+				}
 				m.saveState = SavePending
 				m.saveError = ""
 				return m.saveHistory()
@@ -720,6 +1149,74 @@ func (m appModel) View() tea.View {
 			b.WriteString(m.message)
 			b.WriteString("\nd discard changes · Ctrl-P/Escape retry save")
 		}
+	} else if m.practiceReview {
+		b.WriteString("Practice weaknesses\n\n")
+		if m.practiceLoading {
+			b.WriteString("Loading recent comparable history…")
+		} else if m.practicePreflightLoading {
+			b.WriteString("Checking suitable neutral words and context limits…")
+		} else if m.practiceError != "" || m.practicePreflightError != "" {
+			errText := m.practiceError
+			if errText == "" {
+				errText = m.practicePreflightError
+			}
+			fmt.Fprintf(&b, "Practice unavailable: %s\n0 qualifying items · 1 current / %d history samples",
+				errText, m.practiceHistorySampleCount)
+			if m.practiceHistoryError != "" {
+				fmt.Fprintf(&b, "\nHistory unavailable; current result only: %s", m.practiceHistoryError)
+			}
+		} else if m.practicePlan == nil || len(m.practicePlan.Items) == 0 {
+			fmt.Fprintf(&b, "No qualifying weaknesses were found.\n0 qualifying items · 1 current / %d history samples", m.practiceHistorySampleCount)
+		} else {
+			if m.practiceHistoryError != "" {
+				fmt.Fprintf(&b, "History unavailable; current result only: %s\n\n", m.practiceHistoryError)
+			}
+			if m.practiceOriginResult != nil {
+				fmt.Fprintf(&b, "Evidence window: %s – %s · %d sessions\n\n",
+					time.UnixMilli(m.practicePlan.WindowStartUnixMS).UTC().Format("2006-01-02"),
+					time.UnixMilli(m.practiceOriginResult.FinishedUnixMS).UTC().Format("2006-01-02"),
+					m.practicePlan.SampleSessions)
+			}
+			for i, item := range m.practicePlan.Items {
+				marker := "  "
+				if i == m.practiceSelected {
+					marker = "> "
+				}
+				median := "unavailable"
+				if item.MedianMSPerScalar != nil {
+					median = fmt.Sprintf("%.1fms/scalar", *item.MedianMSPerScalar)
+				}
+				fmt.Fprintf(&b, "%s%s · %s · %d occurrences · %d current/%d history · %s\n",
+					marker, item.Item, item.Reason, item.Occurrences, item.CurrentOccurrences, item.HistoryOccurrences, median)
+				if item.Context != "" {
+					fmt.Fprintf(&b, "   sample: %s\n", item.Context)
+				}
+			}
+			fmt.Fprintf(&b, "\n%d selected · %d sample sessions · Enter start", len(m.practicePlan.Items), m.practicePlan.SampleSessions)
+		}
+		b.WriteString("\n\nUp/Down select · Delete dismiss · r restore · Enter start · Escape cancel")
+	} else if m.practiceActive && (m.session.State == SessionCompleted || m.session.State == SessionExpired) {
+		b.WriteString("Practice results\n\n")
+		if len(m.practiceComparisons) == 0 {
+			b.WriteString("No item comparisons are available.")
+		} else {
+			speedUnavailable := false
+			for _, comparison := range m.practiceComparisons {
+				if comparison.SpeedChangePercent == nil {
+					speedUnavailable = true
+				}
+				fmt.Fprintf(&b, "%s · accuracy Δ %s · errors %d (%s) → %d (%s) · speed %s · samples %d/%d\n",
+					comparison.Item, practiceDeltaDisplay(comparison.AccuracyDelta),
+					comparison.Baseline.Errors, practiceRate(comparison.Baseline),
+					comparison.Drill.Errors, practiceRate(comparison.Drill),
+					practiceDeltaDisplay(comparison.SpeedChangePercent),
+					comparison.Baseline.Occurrences, comparison.Drill.Occurrences)
+			}
+			if speedUnavailable {
+				b.WriteString("Speed comparison unavailable when either side has fewer than 3 complete samples.")
+			}
+		}
+		b.WriteString("\nPractice again: p or a · Return to regular test: n · Escape originating result")
 	} else if m.historyOpen {
 		mode := "Regular"
 		if m.historyPractice {
@@ -798,7 +1295,7 @@ func (m appModel) View() tea.View {
 			case SaveFailed:
 				fmt.Fprintf(&b, "\nStorage       not stored: %s · s: Retry save", m.saveError)
 			}
-			fmt.Fprintf(&b, "\n\nEnter: Next · r: Retry · h: History · Ctrl-C: quit")
+			fmt.Fprintf(&b, "\n\nEnter: Next · r: Retry · p: Review practice evidence · h: History · Ctrl-C: quit")
 		}
 	} else {
 		cfg := m.session.Test.Config
@@ -916,6 +1413,18 @@ func (m appModel) View() tea.View {
 	v.AltScreen = true
 	v.Cursor = nativeCursor
 	return v
+}
+func practiceDeltaDisplay(value *float64) string {
+	if value == nil {
+		return "unavailable"
+	}
+	return fmt.Sprintf("%+.2f%%", *value)
+}
+func practiceRate(item PracticeItem) string {
+	if item.Attempts <= 0 {
+		return "unavailable"
+	}
+	return fmt.Sprintf("%.1f%%", float64(item.Errors)*100/float64(item.Attempts))
 }
 
 func (m *appModel) saveHistory() tea.Cmd {
