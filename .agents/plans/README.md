@@ -46,9 +46,9 @@ Completed Charm tests appear in a durable local History list without retaining p
 
 After a real Charm word test, a user can review measured weaknesses, complete a short targeted drill, and compare practiced items. Implementation record completed 2026-10-01. Required predecessors: 3.
 
-### [005: Launch the remembered test immediately](005-remembered-test-modes.md)
+### [005: Launch the remembered test immediately](005-remembered-test-modes.md) - implemented
 
-Bare tt starts a fresh saved test, defaulting to English 1k for 30 seconds, with intentional test configuration saved on Start. Required predecessors: 4.
+Bare tt starts a fresh saved test, defaulting to English 1k for 30 seconds, with intentional test configuration saved on Start. Implementation record completed 2026-10-06. Required predecessors: 4.
 
 ### [006: Reach every implemented workflow by keyboard](006-keyboard-command-routing.md)
 

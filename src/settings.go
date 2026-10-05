@@ -1,12 +1,8 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/gdamore/tcell"
@@ -28,11 +24,6 @@ type runtimeSettings struct {
 	BlockCursor    bool          `json:"blockCursor"`
 	BoldTypedText  bool          `json:"boldTypedText"`
 	Highlight      highlightMode `json:"highlight"`
-}
-
-type persistedSettings struct {
-	Version  int             `json:"version"`
-	Settings runtimeSettings `json:"settings"`
 }
 
 type settingsOverrides struct {
@@ -62,11 +53,6 @@ type runtimeSettingsWire struct {
 	Highlight      *highlightMode `json:"highlight"`
 }
 
-type persistedSettingsWire struct {
-	Version  *int                 `json:"version"`
-	Settings *runtimeSettingsWire `json:"settings"`
-}
-
 func defaultRuntimeSettings() runtimeSettings {
 	return runtimeSettings{
 		ShowWPM:        false,
@@ -79,13 +65,11 @@ func defaultRuntimeSettings() runtimeSettings {
 }
 
 func loadRuntimeSettings(path string, warnings io.Writer) runtimeSettings {
-	settings, err := loadPersistedSettings(path)
+	configuration, err := LoadConfiguration(path)
 	if err == nil {
-		return settings
+		return configuration.Settings
 	}
-	if !os.IsNotExist(err) {
-		fmt.Fprintf(warnings, "tt: ignoring runtime settings: %s\n", err)
-	}
+	fmt.Fprintf(warnings, "tt: ignoring runtime settings: %s\n", err)
 	return defaultRuntimeSettings()
 }
 
@@ -99,86 +83,60 @@ func validHighlightMode(mode highlightMode) bool {
 }
 
 func loadPersistedSettings(path string) (runtimeSettings, error) {
-	data, err := os.ReadFile(path)
+	configuration, err := loadExistingConfiguration(path)
 	if err != nil {
-		return runtimeSettings{}, err
+		return runtimeSettings{}, fmt.Errorf("load persisted settings: %w", err)
 	}
-
-	var wire persistedSettingsWire
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return runtimeSettings{}, err
-	}
-	if wire.Version == nil || *wire.Version != 1 {
-		return runtimeSettings{}, fmt.Errorf("unsupported settings version")
-	}
-	if wire.Settings == nil || wire.Settings.ShowWPM == nil || wire.Settings.SkipWord == nil ||
-		wire.Settings.AllowBackspace == nil || wire.Settings.BlockCursor == nil ||
-		wire.Settings.BoldTypedText == nil || wire.Settings.Highlight == nil {
-		return runtimeSettings{}, errors.New("settings document is missing required fields")
-	}
-	if !validHighlightMode(*wire.Settings.Highlight) {
-		return runtimeSettings{}, fmt.Errorf("invalid highlight mode %q", *wire.Settings.Highlight)
-	}
-
-	return runtimeSettings{
-		ShowWPM:        *wire.Settings.ShowWPM,
-		SkipWord:       *wire.Settings.SkipWord,
-		AllowBackspace: *wire.Settings.AllowBackspace,
-		BlockCursor:    *wire.Settings.BlockCursor,
-		BoldTypedText:  *wire.Settings.BoldTypedText,
-		Highlight:      *wire.Settings.Highlight,
-	}, nil
+	return configuration.Settings, nil
 }
 
 func savePersistedSettings(path string, settings runtimeSettings) error {
-	if !validHighlightMode(settings.Highlight) {
-		return fmt.Errorf("invalid highlight mode %q", settings.Highlight)
+	dirty := make(map[int]bool, settingsRowCount)
+	for row := range settingsRowCount {
+		dirty[row] = true
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	if err := os.Chmod(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
+	_, err := saveDirtyPersistedSettings(path, settings, dirty)
+	return err
+}
 
-	data, err := json.MarshalIndent(persistedSettings{Version: 1, Settings: settings}, "", "  ")
+// saveDirtyPersistedSettings is the compatibility bridge for the six live
+// settings. It maps modal rows to version-2 field paths so concurrent test,
+// appearance, hint, and unrelated settings edits survive the commit.
+func saveDirtyPersistedSettings(path string, settings runtimeSettings, dirty map[int]bool) (runtimeSettings, error) {
+	draft, err := LoadConfiguration(path)
 	if err != nil {
-		return err
+		return runtimeSettings{}, fmt.Errorf("load configuration before saving settings: %w", err)
 	}
-	data = append(data, '\n')
+	draft.Settings = settings
+	committed, err := commitConfiguration(path, draft, dirtySettingsPaths(dirty))
+	if err != nil {
+		return runtimeSettings{}, err
+	}
+	return committed.Settings, nil
+}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".settings-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	removeTemp := true
-	defer func() {
-		if removeTemp {
-			os.Remove(tmpPath)
+func dirtySettingsPaths(dirty map[int]bool) []string {
+	paths := make([]string, 0, len(dirty))
+	for row := range settingsRowCount {
+		if !dirty[row] {
+			continue
 		}
-	}()
-
-	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
-		return err
+		switch row {
+		case settingShowWPM:
+			paths = append(paths, "settings.showWPM")
+		case settingSkipWord:
+			paths = append(paths, "settings.skipWord")
+		case settingAllowBackspace:
+			paths = append(paths, "settings.allowBackspace")
+		case settingCursorStyle:
+			paths = append(paths, "settings.blockCursor")
+		case settingTypedTextWeight:
+			paths = append(paths, "settings.boldTypedText")
+		case settingWordHighlighting:
+			paths = append(paths, "settings.highlight")
+		}
 	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	removeTemp = false
-	return nil
+	return paths
 }
 
 func collectSettingsOverrides(visited map[string]bool) settingsOverrides {
@@ -722,19 +680,12 @@ func showSettings(screen tcell.Screen, saved *runtimeSettings, overrides setting
 					return false, false
 				}
 
-				latest, err := loadPersistedSettings(RUNTIME_SETTINGS_DB)
-				if os.IsNotExist(err) {
-					latest = defaultRuntimeSettings()
-				} else if err != nil {
+				committedSettings, err := saveDirtyPersistedSettings(RUNTIME_SETTINGS_DB, draft, dirty)
+				if err != nil {
 					message = err.Error()
 					continue
 				}
-				merged := mergeDirtySettings(latest, draft, dirty)
-				if err := savePersistedSettings(RUNTIME_SETTINGS_DB, merged); err != nil {
-					message = err.Error()
-					continue
-				}
-				*saved = merged
+				*saved = committedSettings
 				return true, false
 			}
 

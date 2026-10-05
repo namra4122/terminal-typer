@@ -1,6 +1,6 @@
 # Plan 005: Launch the remembered test immediately
 
-Status: proposed implementation specification. No feature in this document is implemented by the act of writing it. Source: [PRD](../../PRD.md). Planning baseline: 2026-09-26 working tree, including existing uncommitted `src/test.go`, `src/test_test.go`, and `src/tt.go` changes. Reinspect those files before implementation and preserve unrelated work.
+Status: implemented 2026-10-06. This document records the implementation contract and its acceptance checks. Source: [PRD](../../PRD.md). Planning baseline: 2026-09-26 working tree, including existing uncommitted `src/test.go`, `src/test_test.go`, and `src/tt.go` changes.
 
 ## Goal and user job
 
@@ -161,9 +161,9 @@ Release, deployment, publishing binaries, and uploading user data require separa
 
 ## Definition of done
 
-- [ ] AC-1: Fresh bare `tt` resolves timed/1000en/30000 ms, Normal, modifiers off, native dark and sound off. No time accrues before accepted text.
-- [ ] AC-2: All preset/custom boundaries pass; 4 or 3601 seconds and 0 or 501 words are inline-invalid. A fast-input timed fixture exhausts 200 initial words yet continues until the exact timeout.
-- [ ] AC-3: Start a 25-word test, exit/relaunch, and receive 25 fresh words. Browse/cancel a 60-second preview and verify saved bytes are unchanged.
-- [ ] AC-4: Every row of the compatibility matrix below resolves exactly, regardless of conflicting saved mode/modifiers. Explicit CLI presentation overrides affect only the invocation.
-- [ ] AC-5: Migration of valid v1 settings preserves all six values and makes a verified backup. Corrupt/unknown settings stay intact and use read-only defaults with recovery guidance. Failed Start/Settings save leaves original session/config active.
-- [ ] AC-6: Reset-all requires confirmation, restores defaults, and does not change a history file. Saved test configuration never contains private paths or stdin content.
+- [x] AC-1: Fresh bare `tt` resolves timed/1000en/30000 ms, Normal, modifiers off, native dark and sound off. No time accrues before accepted text.
+- [x] AC-2: All preset/custom boundaries pass; 4 or 3601 seconds and 0 or 501 words are inline-invalid. A fast-input timed fixture exhausts 200 initial words yet continues until the exact timeout.
+- [x] AC-3: Start a 25-word test, exit/relaunch, and receive 25 fresh words. Browse/cancel a 60-second preview and verify saved bytes are unchanged.
+- [x] AC-4: Every row of the compatibility matrix below resolves exactly, regardless of conflicting saved mode/modifiers. Explicit CLI presentation overrides affect only the invocation.
+- [x] AC-5: Migration of valid v1 settings preserves all six values and makes a verified backup. Corrupt/unknown settings stay intact and use read-only defaults with recovery guidance. Failed Start/Settings save leaves original session/config active.
+- [x] AC-6: Reset-all requires confirmation, restores defaults, and does not change a history file. Saved test configuration never contains private paths or stdin content.

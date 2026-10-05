@@ -507,7 +507,14 @@ func main() {
 		Highlight:      highlight,
 	}
 
-	savedSettings := loadRuntimeSettings(RUNTIME_SETTINGS_DB, os.Stderr)
+	savedConfiguration, configErr := LoadConfiguration(RUNTIME_SETTINGS_DB)
+	if configErr != nil {
+		if !os.IsNotExist(configErr) {
+			fmt.Fprintf(os.Stderr, "tt: cannot load %s: %v; using read-only defaults. Restore a verified backup or repair the file before saving settings.\n", RUNTIME_SETTINGS_DB, configErr)
+		}
+		savedConfiguration = DefaultConfiguration()
+	}
+	savedSettings := savedConfiguration.Settings
 
 	if noTheme {
 		os.Setenv("TCELL_TRUECOLOR", "disable")
@@ -531,7 +538,7 @@ func main() {
 	if len(flag.Args()) > 0 {
 		inputFile = flag.Args()[0]
 	}
-	config := resolveTestConfig(testOptions{
+	inputFlags := testOptions{
 		Words:           wordFile,
 		Quotes:          quoteFile,
 		File:            inputFile,
@@ -542,7 +549,14 @@ func main() {
 		Raw:             rawMode,
 		Multi:           multiMode,
 		StartParagraph:  startParagraph,
-	})
+	}
+	config, err := ResolveLaunch(savedConfiguration, inputFlags, visitedFlags)
+	if err != nil {
+		die("resolving test: %v", err)
+	}
+	if os.Getenv("TT_UI") == "legacy" && !legacyLaunch(inputFlags, visitedFlags) {
+		config = resolveTestConfig(inputFlags)
+	}
 	var stdinData []byte
 	if config.Source == stdinSource {
 		b, err := ioutil.ReadAll(os.Stdin)
@@ -552,12 +566,18 @@ func main() {
 		stdinData = b
 	}
 	testFn := newTestGenerator(config, stdinData)
-	if os.Getenv("TT_UI") == "charm" && charmInvocationSupported(config, visitedFlags, isatty.IsTerminal(os.Stdin.Fd())) {
+	charmTheme := ""
+	if visitedFlags["theme"] {
+		charmTheme = themeName
+	}
+	if os.Getenv("TT_UI") != "legacy" && (os.Getenv("TT_UI") == "charm" && charmInvocationSupported(config, visitedFlags, isatty.IsTerminal(os.Stdin.Fd())) || !legacyLaunch(inputFlags, visitedFlags)) {
 		generated := testFn()
 		if generated == nil {
 			exit(0)
 		}
-		_, rc, runErr := RunCharm(generated, savedSettings, overrides, liveFlags)
+		_, rc, runErr := RunCharm(generated, savedConfiguration, overrides, liveFlags, CharmLaunchOptions{
+			Theme: charmTheme, OneShot: oneShotMode, NoReport: noReport, CSV: csvMode, JSON: jsonMode, ReadOnly: configErr != nil,
+		})
 		if runErr != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %s\n", runErr)
 			os.Exit(1)
@@ -672,7 +692,7 @@ func charmInvocationSupported(config TestConfig, visited map[string]bool, stdinI
 	}
 	for name := range visited {
 		switch name {
-		case "n", "g", "t", "showwpm", "noskip", "nobackspace", "blockcursor", "bold", "nohighlight", "highlight1", "highlight2":
+		case "n", "g", "t", "showwpm", "noskip", "nobackspace", "blockcursor", "bold", "nohighlight", "highlight1", "highlight2", "theme", "oneshot", "noreport", "csv", "json":
 		default:
 			return false
 		}

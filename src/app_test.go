@@ -307,12 +307,13 @@ func TestCharmResizePreservesAttemptAcrossMinimumSize(t *testing.T) {
 	}
 }
 
-func TestCharmRouteRejectsUnsupportedInvocation(t *testing.T) {
+func TestCharmRouteAcceptsPresentationFlagsAndRejectsLegacyOnlyInput(t *testing.T) {
 	config := TestConfig{Source: wordSource}
 	allowed := map[string]bool{
 		"n": true, "g": true, "t": true, "showwpm": true, "noskip": true,
 		"nobackspace": true, "blockcursor": true, "bold": true,
 		"nohighlight": true, "highlight1": true, "highlight2": true,
+		"theme": true, "oneshot": true, "noreport": true, "csv": true, "json": true,
 	}
 	if !charmInvocationSupported(config, allowed, true) {
 		t.Fatal("supported word-test invocation did not select Charm")
@@ -323,13 +324,13 @@ func TestCharmRouteRejectsUnsupportedInvocation(t *testing.T) {
 	for _, source := range []testSource{quoteSource, stdinSource, fileSource} {
 		config.Source = source
 		if charmInvocationSupported(config, nil, true) {
-			t.Fatalf("source %q selected Charm", source)
+			t.Fatalf("source %q selected explicit Charm compatibility route", source)
 		}
 	}
 	config.Source = wordSource
-	for _, name := range []string{"start", "w", "v", "words", "quotes", "notheme", "oneshot", "noreport", "csv", "json", "raw", "multi", "theme", "list", "sound", "error-sound"} {
+	for _, name := range []string{"start", "w", "v", "words", "quotes", "notheme", "raw", "multi", "list", "sound", "error-sound"} {
 		if charmInvocationSupported(config, map[string]bool{name: true}, true) {
-			t.Fatalf("unsupported flag %q selected Charm", name)
+			t.Fatalf("legacy-only flag %q selected Charm", name)
 		}
 	}
 }
@@ -795,5 +796,372 @@ func TestCharmPracticeCompletesPersistsRepeatsAndEscapes(t *testing.T) {
 	model = value.(appModel)
 	if model.practiceActive || model.session.Test == nil || model.session.Test.Config != originTest.Config {
 		t.Fatalf("regular return did not restore configuration: active=%v test=%#v", model.practiceActive, model.session.Test)
+	}
+}
+
+func timedAppModel(t *testing.T) appModel {
+	t.Helper()
+	stream, err := newDeterministicWordStream([]string{"alpha", "beta", "gamma", "delta"}, 17, 29)
+	if err != nil {
+		t.Fatal(err)
+	}
+	test := &Test{
+		Config: TestConfig{
+			Mode: timedMode, Source: wordSource, Pack: "1000en",
+			TimeLimit: 30 * time.Second, WordCount: 200, WordsPerGroup: 200, Groups: 1,
+			Difficulty: "normal",
+		},
+		SourceID: "words:1000en",
+		Origin: ResourceOrigin{
+			Kind: "embedded-word", PackID: "1000en", Revision: strings.Repeat("a", 64), Embedded: true,
+		},
+		Segments:           []segment{{Text: strings.Join(stream.next(200), " ")}},
+		EligibleForHistory: true,
+		EligibleForPB:      true,
+		wordStream:         stream,
+	}
+	configuration := DefaultConfiguration()
+	session := NewSession(test, "attempt", "prompt")
+	now := sessionNow()
+	session.State = SessionRunning
+	session.StartedAtNS = now
+	session.LastAtNS = now
+	session.SkipWord = configuration.Settings.SkipWord
+	session.AllowBackspace = configuration.Settings.AllowBackspace
+	return appModel{
+		session: session, saved: configuration.Settings, settings: configuration.Settings,
+		draftSettings: configuration.Settings, configuration: configuration,
+		timeLimit: test.Config.TimeLimit, tests: []*testEntry{{test: test, promptID: "prompt"}},
+		attempts: map[string]string{"prompt": "attempt"},
+	}
+}
+
+func promptBurst(prompt string, completedWords int) string {
+	cut := 0
+	for range completedWords {
+		next := strings.IndexByte(prompt[cut:], ' ')
+		if next < 0 {
+			return prompt
+		}
+		cut += next + 1
+	}
+	return prompt[:cut]
+}
+
+func TestCharmTimedFastInputRefillsWithoutDroppingEventsAndRetryKeepsStream(t *testing.T) {
+	model := timedAppModel(t)
+	firstBurst := promptBurst(model.session.promptText, 151)
+	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Text: firstBurst}))
+	model = updated.(appModel)
+	if model.session.State != SessionRunning || model.session.Test.Config.WordCount != 300 {
+		t.Fatalf("timed refill state=%s words=%d cursor=%d events=%d", model.session.State, model.session.Test.Config.WordCount, model.session.Cursor, len(model.session.Events))
+	}
+	if len(model.session.Events) != len([]rune(firstBurst)) {
+		t.Fatalf("processed %d input events, want %d", len(model.session.Events), len([]rune(firstBurst)))
+	}
+	generatedPrefix := model.session.promptText
+	previousAttempt := model.session.AttemptID
+	if err := model.restartCurrentAttempt(); err != nil {
+		t.Fatal(err)
+	}
+	if model.session.RetryOf != previousAttempt || model.session.promptText != generatedPrefix {
+		t.Fatal("retry did not rewind the complete generated timed stream")
+	}
+	secondBurst := promptBurst(model.session.promptText, 251)
+	updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Text: secondBurst}))
+	model = updated.(appModel)
+	if model.session.Test.Config.WordCount != 400 || !strings.HasPrefix(model.session.promptText, generatedPrefix+" ") {
+		t.Fatalf("faster retry did not continue cached stream: words=%d", model.session.Test.Config.WordCount)
+	}
+}
+
+func configurableAppModel(t *testing.T, configuration Configuration) appModel {
+	t.Helper()
+	cfg, err := ResolveLaunch(configuration, testOptions{StdinIsTerminal: true, TimeoutSeconds: -1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generate, err := prepareTestGenerator(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	test := generate()
+	session := NewSession(test, "attempt", "prompt")
+	session.AllowBackspace = configuration.Settings.AllowBackspace
+	session.SkipWord = configuration.Settings.SkipWord
+	return appModel{
+		session: session, saved: configuration.Settings, settings: configuration.Settings,
+		draftSettings: configuration.Settings, configuration: configuration,
+		timeLimit: cfg.TimeLimit, tests: []*testEntry{{test: test, promptID: "prompt"}},
+		attempts: map[string]string{"prompt": "attempt"}, generateTest: generate,
+	}
+}
+
+func commitTestConfiguration(t *testing.T, path string, configuration Configuration) {
+	t.Helper()
+	if err := CommitConfiguration(path, configuration, []string{"settings", "test", "appearance", "discoveredHints"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCharmConfigurePreviewAndCancelLeaveBytesAndSessionUnchanged(t *testing.T) {
+	originalPath := RUNTIME_SETTINGS_DB
+	defer func() { RUNTIME_SETTINGS_DB = originalPath }()
+	RUNTIME_SETTINGS_DB = filepath.Join(t.TempDir(), "settings.json")
+	configuration := DefaultConfiguration()
+	commitTestConfiguration(t, RUNTIME_SETTINGS_DB, configuration)
+	before, err := os.ReadFile(RUNTIME_SETTINGS_DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := configurableAppModel(t, configuration)
+	originalSession, originalPrompt := model.session, model.session.promptText
+	model.openConfigure(configureTestTab, sessionNow())
+	model.configureSelected = 1
+	model.updateConfigure("space", sessionNow())
+	if model.draftConfiguration.Test.DurationSeconds != 60 {
+		t.Fatalf("duration preview = %d, want 60", model.draftConfiguration.Test.DurationSeconds)
+	}
+	model.configureSelected = configureSpecificRows(configureTestTab) + 1
+	model.updateConfigure("enter", sessionNow())
+	if !model.configurePreview || !strings.Contains(model.View().Content, "Preview does not save") {
+		t.Fatalf("preview view = %q", model.View().Content)
+	}
+	model.updateConfigure("escape", sessionNow())
+	model.updateConfigure("escape", sessionNow())
+	after, err := os.ReadFile(RUNTIME_SETTINGS_DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) || model.session != originalSession || model.session.promptText != originalPrompt ||
+		model.session.PauseReasons["configure"] {
+		t.Fatal("preview/cancel changed saved bytes or the active session")
+	}
+}
+
+func TestCharmConfigureFailedStartPreservesSessionAndConfiguration(t *testing.T) {
+	originalPath := RUNTIME_SETTINGS_DB
+	defer func() { RUNTIME_SETTINGS_DB = originalPath }()
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocked, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	RUNTIME_SETTINGS_DB = filepath.Join(blocked, "settings.json")
+	configuration := DefaultConfiguration()
+	model := configurableAppModel(t, configuration)
+	for i, character := range []rune("alpha") {
+		if err := model.session.Apply(SessionInput{Kind: InputText, Text: string(character), AtNS: int64(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model.refreshMeaningful()
+	attempt, cursor, prompt := model.session.AttemptID, model.session.Cursor, model.session.promptText
+	model.openConfigure(configureTestTab, sessionNow())
+	model.draftConfiguration.Test.Mode = "count"
+	model.draftConfiguration.Test.Count = 25
+	model.draftConfiguration.Test.Pack = "1000en"
+	model.markConfigurationDirty("test")
+	if command := model.requestConfigurationStart(); command != nil || model.configureConfirm != "start" {
+		t.Fatal("meaningful replacement did not require confirmation")
+	}
+	command := model.updateConfigure("enter", sessionNow())
+	if command == nil || !model.savingConfiguration {
+		t.Fatal("confirmed Start did not schedule the transaction")
+	}
+	updated, _ := model.Update(command())
+	model = updated.(appModel)
+	if !model.configureOpen || model.configureMessage == "" || model.session.AttemptID != attempt ||
+		model.session.Cursor != cursor || model.session.promptText != prompt || !reflect.DeepEqual(model.configuration, configuration) {
+		t.Fatalf("failed Start changed active state: %#v", model)
+	}
+}
+
+func TestCharmConfigureStartPersistsCountAndStartsFreshContent(t *testing.T) {
+	originalPath := RUNTIME_SETTINGS_DB
+	defer func() { RUNTIME_SETTINGS_DB = originalPath }()
+	RUNTIME_SETTINGS_DB = filepath.Join(t.TempDir(), "settings.json")
+	configuration := DefaultConfiguration()
+	model := configurableAppModel(t, configuration)
+	oldPrompt := model.session.promptText
+	model.openConfigure(configureTestTab, sessionNow())
+	model.draftConfiguration.Test.Mode = "count"
+	model.draftConfiguration.Test.Count = 25
+	model.draftConfiguration.Test.Pack = "1000en"
+	model.markConfigurationDirty("test")
+	command := model.requestConfigurationStart()
+	if command == nil {
+		t.Fatal("Start did not schedule configuration commit")
+	}
+	updated, _ := model.Update(command())
+	model = updated.(appModel)
+	persisted, err := LoadConfiguration(RUNTIME_SETTINGS_DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.configureOpen || model.session.Test.Config.Mode != wordMode || model.session.Test.Config.WordCount != 25 ||
+		len(strings.Fields(model.session.promptText)) != 25 || model.session.promptText == oldPrompt ||
+		persisted.Test.Mode != "count" || persisted.Test.Count != 25 {
+		t.Fatalf("successful Start = model %#v persisted %#v", model, persisted)
+	}
+}
+
+func TestCharmResetAllConfirmsRestoresDefaultsAndLeavesHistoryUntouched(t *testing.T) {
+	originalPath := RUNTIME_SETTINGS_DB
+	defer func() { RUNTIME_SETTINGS_DB = originalPath }()
+	root := t.TempDir()
+	RUNTIME_SETTINGS_DB = filepath.Join(root, "settings.json")
+	configuration := DefaultConfiguration()
+	configuration.Test.Mode = "count"
+	configuration.Test.Count = 25
+	configuration.Settings.ShowWPM = true
+	configuration.Appearance.Focus = true
+	configuration.DiscoveredHints = []string{hintConfigure}
+	commitTestConfiguration(t, RUNTIME_SETTINGS_DB, configuration)
+	historyPath := filepath.Join(root, "history-v1", "sentinel")
+	if err := os.MkdirAll(filepath.Dir(historyPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	historyBytes := []byte("history stays")
+	if err := os.WriteFile(historyPath, historyBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := configurableAppModel(t, configuration)
+	model.openConfigure(configureDataTab, sessionNow())
+	model.configureSelected = 2
+	if command := model.updateConfigure("enter", sessionNow()); command != nil || model.configureConfirm != "reset-all" {
+		t.Fatal("reset all did not ask for confirmation")
+	}
+	command := model.updateConfigure("enter", sessionNow())
+	if command == nil {
+		t.Fatal("confirmed reset all did not schedule a transaction")
+	}
+	updated, _ := model.Update(command())
+	model = updated.(appModel)
+	persisted, err := LoadConfiguration(RUNTIME_SETTINGS_DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterHistory, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(persisted, DefaultConfiguration()) || !reflect.DeepEqual(afterHistory, historyBytes) ||
+		!reflect.DeepEqual(model.configuration, DefaultConfiguration()) {
+		t.Fatalf("reset all persisted=%#v history=%q active=%#v", persisted, afterHistory, model.configuration)
+	}
+}
+
+func TestCharmConfigureGroupsOnlyExposeImplementedActions(t *testing.T) {
+	model := configurableAppModel(t, DefaultConfiguration())
+	model.openConfigure(configureTestTab, sessionNow())
+	view := model.View().Content
+	for _, group := range configureTabLabels {
+		if !strings.Contains(view, group) {
+			t.Fatalf("Configure is missing %q group: %q", group, view)
+		}
+	}
+	if !strings.Contains(view, "Reset current section") || !strings.Contains(view, "Preview") ||
+		!strings.Contains(view, "Start") || !strings.Contains(view, "Cancel") {
+		t.Fatalf("Configure is missing footer actions: %q", view)
+	}
+	for range configureTabCount - 1 {
+		model.updateConfigure("tab", sessionNow())
+	}
+	if model.configureTab != configureHelpTab || !strings.Contains(model.View().Content, "Dismiss first-run hints") {
+		t.Fatalf("Tab journey did not reach Help: tab=%d view=%q", model.configureTab, model.View().Content)
+	}
+}
+
+func TestCharmNoReportOneShotReturnsMachineResultWithoutResultScreen(t *testing.T) {
+	session := testSession("a")
+	if err := session.Apply(SessionInput{Kind: InputText, Text: "a", AtNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	model := appModel{
+		session: session, saved: defaultRuntimeSettings(), settings: defaultRuntimeSettings(),
+		launchOptions: CharmLaunchOptions{OneShot: true, NoReport: true},
+	}
+	command := model.markResultReady(2)
+	if command == nil || !model.quitting || !model.successfulExit || len(model.outputResults) != 1 {
+		t.Fatalf("one-shot no-report completion = %#v", model)
+	}
+	if strings.Contains(model.View().Content, "Results") {
+		t.Fatalf("no-report exposed the result screen: %q", model.View().Content)
+	}
+}
+
+func TestCharmDismissedHintsPersistOnIntentionalStart(t *testing.T) {
+	originalPath := RUNTIME_SETTINGS_DB
+	defer func() { RUNTIME_SETTINGS_DB = originalPath }()
+	RUNTIME_SETTINGS_DB = filepath.Join(t.TempDir(), "settings.json")
+	model := configurableAppModel(t, DefaultConfiguration())
+	model.openConfigure(configureHelpTab, sessionNow())
+	model.configureSelected = 0
+	model.updateConfigure("enter", sessionNow())
+	model.configureSelected = configureSpecificRows(configureHelpTab) + 2
+	command := model.updateConfigure("enter", sessionNow())
+	if command == nil {
+		t.Fatal("Start after dismissing hints did not schedule persistence")
+	}
+	updated, _ := model.Update(command())
+	model = updated.(appModel)
+	persisted, err := LoadConfiguration(RUNTIME_SETTINGS_DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hint := range []string{hintConfigure, hintSettings, hintHelp} {
+		if !hasHint(persisted, hint) {
+			t.Fatalf("hint %q was not persisted: %#v", hint, persisted.DiscoveredHints)
+		}
+	}
+	if strings.Contains(model.View().Content, "Hint: Ctrl-K") {
+		t.Fatalf("dismissed first-run hint remained visible: %q", model.View().Content)
+	}
+}
+
+func TestCharmConfigureResetScopesDoNotCrossSections(t *testing.T) {
+	configuration := DefaultConfiguration()
+	configuration.Test.Mode = "count"
+	configuration.Test.Count = 25
+	configuration.Appearance.Focus = true
+	configuration.Appearance.KeySound = "click"
+	model := configurableAppModel(t, configuration)
+
+	model.openConfigure(configureTestTab, sessionNow())
+	model.configureSelected = configureSpecificRows(configureTestTab)
+	model.updateConfigure("enter", sessionNow())
+	if !reflect.DeepEqual(model.draftConfiguration.Test, DefaultConfiguration().Test) ||
+		model.draftConfiguration.Appearance.KeySound != "click" {
+		t.Fatalf("test-section reset crossed sections: %#v", model.draftConfiguration)
+	}
+
+	model.draftConfiguration = configuration
+	model.configureTab = configureDisplayTab
+	model.resetConfigureSection()
+	if model.draftConfiguration.Appearance.Focus || model.draftConfiguration.Appearance.KeySound != "click" {
+		t.Fatalf("display reset changed sound state: %#v", model.draftConfiguration.Appearance)
+	}
+
+	model.draftConfiguration = configuration
+	model.configureTab = configureDataTab
+	model.configureSelected = 1
+	model.activateConfigureRow("enter", sessionNow())
+	if !reflect.DeepEqual(model.draftConfiguration.Appearance, DefaultConfiguration().Appearance) {
+		t.Fatalf("appearance reset = %#v", model.draftConfiguration.Appearance)
+	}
+}
+
+func TestCharmMachineResultKeepsVisitedMistakesWithoutInventingTimedTail(t *testing.T) {
+	session := testSession("alpha beta")
+	for i, character := range "alpya" {
+		if err := session.Apply(SessionInput{Kind: InputText, Text: string(character), AtNS: int64(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session.State = SessionExpired
+	model := appModel{session: session, settings: defaultRuntimeSettings()}
+	model.markResultReady(10)
+	if len(model.outputResults) != 1 || !reflect.DeepEqual(model.outputResults[0].Mistakes, []mistake{{Word: "alpha", Typed: "alpya"}}) {
+		t.Fatalf("machine result mistakes = %#v", model.outputResults)
 	}
 }

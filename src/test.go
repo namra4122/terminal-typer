@@ -1,13 +1,20 @@
 package main
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	rand "math/rand/v2"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type testMode string
 
 const (
+	timedMode  testMode = "timed"
 	wordMode   testMode = "words"
 	quoteMode  testMode = "quote"
 	customMode testMode = "custom"
@@ -98,23 +105,117 @@ type Test struct {
 	Attribution        string
 	EligibleForHistory bool
 	EligibleForPB      bool
+	wordStream         *deterministicWordStream
 }
 
-func newTestGenerator(cfg TestConfig, stdinData []byte) func() *Test {
+type deterministicWordStream struct {
+	words           []string
+	rng             *rand.Rand
+	last            string
+	hasAlternatives bool
+}
+
+func newDeterministicWordStream(words []string, seed1, seed2 uint64) (*deterministicWordStream, error) {
+	if len(words) == 0 {
+		return nil, fmt.Errorf("word pack is empty")
+	}
+	stream := &deterministicWordStream{
+		words: append([]string(nil), words...),
+		rng:   rand.New(rand.NewPCG(seed1, seed2)),
+	}
+	for _, word := range words[1:] {
+		if word != words[0] {
+			stream.hasAlternatives = true
+			break
+		}
+	}
+	return stream, nil
+}
+
+func (s *deterministicWordStream) next(count int) []string {
+	if s == nil || count <= 0 {
+		return nil
+	}
+	generated := make([]string, count)
+	for i := range generated {
+		word := s.words[s.rng.IntN(len(s.words))]
+		if s.hasAlternatives {
+			for word == s.last {
+				word = s.words[s.rng.IntN(len(s.words))]
+			}
+		}
+		generated[i] = word
+		s.last = word
+	}
+	return generated
+}
+
+func (t *Test) appendTimedWords(count int) string {
+	if t == nil || t.Config.Mode != timedMode || t.wordStream == nil || count <= 0 {
+		return ""
+	}
+	addition := strings.Join(t.wordStream.next(count), " ")
+	if addition == "" {
+		return ""
+	}
+	if len(t.Segments) == 0 {
+		t.Segments = []segment{{Text: addition}}
+	} else if t.Segments[0].Text == "" {
+		t.Segments[0].Text = addition
+	} else {
+		t.Segments[0].Text += " " + addition
+	}
+	t.Config.WordCount += count
+	t.Config.WordsPerGroup += count
+	return addition
+}
+
+func testSeed() (uint64, uint64, error) {
+	var seed [16]byte
+	if _, err := cryptorand.Read(seed[:]); err != nil {
+		return 0, 0, fmt.Errorf("creating test seed: %w", err)
+	}
+	return binary.LittleEndian.Uint64(seed[:8]), binary.LittleEndian.Uint64(seed[8:]), nil
+}
+
+func prepareTestGenerator(cfg TestConfig, stdinData []byte) (func() *Test, error) {
 	var generate func() []segment
+	var timedWords []string
 	var origin ResourceOrigin
 	sourceID := string(cfg.Source) + ":" + cfg.Pack
 	switch cfg.Source {
 	case wordSource:
 		data, resolved, err := ResolveResource("words", cfg.Pack)
 		if err != nil {
-			die("%s does not appear to be a valid word list. See '-list words' for a list of builtin word lists.", cfg.Pack)
+			return nil, fmt.Errorf("word pack %q: %w", cfg.Pack, err)
 		}
 		origin = resolved
-		generate = generateWordTestFromBytes(data, cfg.WordsPerGroup, cfg.Groups)
+		timedWords = strings.Fields(string(data))
+		if len(timedWords) == 0 {
+			return nil, fmt.Errorf("word pack %q is empty", cfg.Pack)
+		}
 	case quoteSource:
-		origin = ResourceOrigin{Kind: "private-quote"}
-		generate = generateQuoteTest(cfg.Pack)
+		data, resolved, err := ResolveResource("quotes", cfg.Pack)
+		if err != nil {
+			return nil, fmt.Errorf("quote pack %q: %w", cfg.Pack, err)
+		}
+		var quotes []segment
+		if err := json.Unmarshal(data, &quotes); err != nil {
+			return nil, fmt.Errorf("quote pack %q: %w", cfg.Pack, err)
+		}
+		if len(quotes) == 0 {
+			return nil, fmt.Errorf("quote pack %q is empty", cfg.Pack)
+		}
+		origin = resolved
+		seed1, seed2, err := testSeed()
+		if err != nil {
+			return nil, err
+		}
+		rng := rand.New(rand.NewPCG(seed1, seed2))
+		generate = func() []segment {
+			quote := quotes[rng.IntN(len(quotes))]
+			return []segment{quote}
+		}
 	case stdinSource:
 		origin = ResourceOrigin{Kind: "stdin", Path: "-"}
 		generate = generateTestFromData(stdinData, cfg.Raw, cfg.Multi)
@@ -124,13 +225,41 @@ func newTestGenerator(cfg TestConfig, stdinData []byte) func() *Test {
 		generate = generateTestFromFile(cfg.Pack, cfg.StartParagraph)
 		path, err := filepath.Abs(cfg.Pack)
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("resolving input path: %w", err)
 		}
 		sourceID = "file:" + path
+	default:
+		return nil, fmt.Errorf("unsupported test source %q", cfg.Source)
 	}
 
+	var seedSource *rand.Rand
+	if cfg.Source == wordSource {
+		seed1, seed2, err := testSeed()
+		if err != nil {
+			return nil, err
+		}
+		seedSource = rand.New(rand.NewPCG(seed1, seed2))
+	}
 	return func() *Test {
-		segments := generate()
+		var segments []segment
+		var stream *deterministicWordStream
+		if cfg.Source == wordSource {
+			stream, _ = newDeterministicWordStream(timedWords, seedSource.Uint64(), seedSource.Uint64())
+			if cfg.Mode == timedMode || cfg.Groups <= 1 {
+				count := cfg.WordCount
+				if count <= 0 {
+					count = cfg.WordsPerGroup
+				}
+				segments = []segment{{Text: strings.Join(stream.next(count), " ")}}
+			} else {
+				segments = make([]segment, cfg.Groups)
+				for i := range segments {
+					segments[i].Text = strings.Join(stream.next(cfg.WordsPerGroup), " ")
+				}
+			}
+		} else {
+			segments = generate()
+		}
 		if segments == nil {
 			return nil
 		}
@@ -142,11 +271,22 @@ func newTestGenerator(cfg TestConfig, stdinData []byte) func() *Test {
 			EligibleForHistory: true,
 			EligibleForPB:      true,
 		}
+		if cfg.Mode == timedMode {
+			test.wordStream = stream
+		}
 		if len(segments) == 1 {
 			test.Attribution = segments[0].Attribution
 		}
 		return test
+	}, nil
+}
+
+func newTestGenerator(cfg TestConfig, stdinData []byte) func() *Test {
+	generate, err := prepareTestGenerator(cfg, stdinData)
+	if err != nil {
+		die("%v", err)
 	}
+	return generate
 }
 
 func displaySegments(test *Test, reflow func(string) string) []segment {

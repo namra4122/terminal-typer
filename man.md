@@ -12,11 +12,15 @@ usage: tt \[OPTION\]... \[FILE\]
 
   This manual describes the current source checkout. The executable still
   reports version 0.4.2, but the source checkout includes changes beyond the
-  historical 0.4.2 release notes. The repository's five-phase roadmap
-  describes proposals, not installed features.
+  historical release notes.
 
-  By default tt creates a test consisting of 50 randomly generated words from
-  the top 1000 words in the English language. If provided with a path, tt will
+  By default tt starts a fresh remembered 30-second typing test using the
+  embedded English 1000-word list. The timer starts on accepted text. Ctrl-K
+  opens Configure: choose timed (15/30/60/120 or custom 5-3600 seconds), count
+  (10/25/50/100 or custom 1-500 words), or an authored quote. Start saves the
+  choice and begins fresh content; Cancel does not save. After meaningful input,
+  Start requires replacement confirmation. Timed content extends as necessary.
+  If provided with a path, tt will
   use the given file as input treating each paragraph as a separate segment of
   the test. The program will automatically keep track of your position in the
   file so subsequent invocations on the same path will place you at the most
@@ -26,9 +30,11 @@ usage: tt \[OPTION\]... \[FILE\]
   test. Each paragraph of the input is treated as a segment unless '-multi' is
   supplied in which case each paragraph is treated as a separate test. 
 
-  Source builds require Go 1.26.0 or newer. The contributor-only Charm renderer
-  can be selected with **TT_UI=charm** for terminal word tests; unsupported
-  invocations continue through the existing renderer.
+  Source builds require Go 1.26.0 or newer. Bare and presentation-only
+  launches use Charm. Explicit test-defining flags, files and stdin retain the
+  legacy renderer without inheriting a saved timer or modifiers. TT_UI=legacy
+  temporarily selects the old renderer for bare launches; TT_UI=charm can
+  still opt supported explicit word tests into Charm.
 
   On the Charm route, completed tests show effective/raw WPM, CPM, input
   accuracy, consistency, error totals, active and paused time, configuration,
@@ -49,9 +55,19 @@ usage: tt \[OPTION\]... \[FILE\]
   speed change is unavailable if either side has fewer than three complete
   occurrences. On practice Results, **a** starts a fresh shuffle of the
   same curriculum, **n** starts a fresh regular test with the previous
-  configuration, and **esc** restores the originating result. The Charm CLI
-  currently accepts word tests only; quote tests use the original renderer.
+  configuration, and **esc** restores the originating result. Explicit
+  quote sources still use the original renderer.
 
+
+  Charm Ctrl-K Configure has Test, Content, Typing, Display, Sound, Data and
+  Help groups. Tab/Shift-Tab change groups; arrows select rows; Space/Enter
+  change available controls. Reset-all requires confirmation and leaves
+  History untouched. Ctrl-P retains the six live controls. Version-1 settings
+  are migrated to version 2 after writing a verified private backup under
+  the data directory's backups/ folder. Invalid or unknown settings are left
+  intact and use read-only defaults until repaired. To run older code again,
+  manually restore a verified version-1 backup in a separate data root;
+  older code cannot read version-2 settings.
 
 # OPTIONS
 

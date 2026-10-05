@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -34,8 +38,19 @@ type testReadyMsg struct {
 	err                 error
 }
 type settingsSavedMsg struct {
-	settings runtimeSettings
-	err      error
+	configuration Configuration
+	settings      runtimeSettings
+	err           error
+}
+type hintsSavedMsg struct {
+	hints []string
+	err   error
+}
+type configurationStartedMsg struct {
+	configuration       Configuration
+	test                *Test
+	attemptID, promptID string
+	err                 error
 }
 type historySavedMsg struct {
 	id  string
@@ -63,15 +78,62 @@ type practicePreflightMsg struct {
 	requestID uint64
 	err       error
 }
+
+// CharmLaunchOptions are invocation-only presentation and output choices.
+// They are deliberately excluded from Configuration so CLI flags never become
+// remembered test or appearance settings.
+type CharmLaunchOptions struct {
+	Theme             string
+	OneShot, NoReport bool
+	CSV, JSON         bool
+	ReadOnly          bool
+}
+
+const (
+	configureTestTab = iota
+	configureContentTab
+	configureTypingTab
+	configureDisplayTab
+	configureSoundTab
+	configureDataTab
+	configureHelpTab
+	configureTabCount
+)
+
+var configureTabLabels = [configureTabCount]string{
+	"Test", "Content", "Typing", "Display", "Sound", "Data", "Help",
+}
+
+const (
+	hintConfigure = "configure"
+	hintSettings  = "settings"
+	hintHelp      = "help"
+)
+
 type appModel struct {
 	session                     *Session
 	width, height               int
 	settings                    runtimeSettings
 	saved                       runtimeSettings
 	draftSettings               runtimeSettings
+	configuration               Configuration
+	draftConfiguration          Configuration
+	configurationDirty          map[string]bool
+	showFirstRunHints           bool
+	hintSaveError               string
 	overrides                   settingsOverrides
 	flags                       flagValues
+	launchOptions               CharmLaunchOptions
 	settingsOpen                bool
+	configureOpen               bool
+	configureTab                int
+	configureSelected           int
+	configureEditing            string
+	configureInput              string
+	configurePreview            bool
+	configureConfirm            string
+	configureMessage            string
+	savingConfiguration         bool
 	selected                    int
 	meaningful                  bool
 	processedEventCount         int
@@ -80,6 +142,8 @@ type appModel struct {
 	tooSmall                    bool
 	timeLimit                   time.Duration
 	quitting                    bool
+	successfulExit              bool
+	timedRefillCursor           int
 	dirty                       map[int]bool
 	message                     string
 	tests                       []*testEntry
@@ -91,6 +155,7 @@ type appModel struct {
 	savingSettings              bool
 	resultReadyAtNS             int64
 	result                      *SessionResult
+	outputResults               []result
 	historyRoot                 string
 	historyRecord               HistoryRecord
 	saveState                   SaveState
@@ -134,9 +199,28 @@ type appTick time.Time
 func tickCmd() tea.Cmd {
 	return tea.Tick(25*time.Millisecond, func(t time.Time) tea.Msg { return appTick(t) })
 }
-func (m appModel) Init() tea.Cmd { return tickCmd() }
+func (m appModel) Init() tea.Cmd {
+	if !m.showFirstRunHints || m.launchOptions.ReadOnly {
+		return tickCmd()
+	}
+	draft := m.configuration
+	for _, id := range []string{hintConfigure, hintSettings, hintHelp} {
+		discoverHint(&draft, id)
+	}
+	return tea.Batch(tickCmd(), func() tea.Msg {
+		committed, err := commitConfiguration(RUNTIME_SETTINGS_DB, draft, []string{"discoveredHints"})
+		return hintsSavedMsg{hints: committed.DiscoveredHints, err: err}
+	})
+}
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
+	case hintsSavedMsg:
+		if v.err != nil {
+			m.hintSaveError = fmt.Sprintf("Cannot remember hints: %v", v.err)
+		} else {
+			m.configuration.DiscoveredHints = v.hints
+		}
+		return m, nil
 	case historySavedMsg:
 		delete(m.pendingHistory, v.id)
 		latest := v.id == m.historyRecord.ID
@@ -267,6 +351,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = v.err.Error()
 			return m, nil
 		}
+		m.configuration = v.configuration
 		m.saved = v.settings
 		m.draftSettings = v.settings
 		m.settings = effectiveRuntimeSettings(v.settings, m.overrides, m.flags)
@@ -276,6 +361,32 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = ""
 		m.settingsOpen = false
 		_ = m.session.Apply(SessionInput{Kind: InputResume, Reason: "settings", AtNS: sessionNow()})
+		return m, nil
+	case configurationStartedMsg:
+		m.savingConfiguration = false
+		if v.err != nil {
+			m.configureMessage = v.err.Error()
+			return m, nil
+		}
+		m.configuration = v.configuration
+		m.showFirstRunHints = false
+		m.draftConfiguration = v.configuration
+		m.saved = v.configuration.Settings
+		m.draftSettings = v.configuration.Settings
+		m.settings = effectiveRuntimeSettings(v.configuration.Settings, m.overrides, m.flags)
+		m.configureOpen = false
+		m.configurePreview = false
+		m.configureConfirm = ""
+		m.configureEditing = ""
+		m.configureMessage = ""
+		m.configurationDirty = nil
+		m.tests = []*testEntry{{test: v.test, promptID: v.promptID}}
+		m.testIndex = 0
+		m.generateTest = newTestGenerator(v.test.Config, nil)
+		m.attempts = make(map[string]string)
+		if err := m.activateTest(v.attemptID); err != nil {
+			m.testError = err.Error()
+		}
 		return m, nil
 	case testReadyMsg:
 		m.generating = false
@@ -330,7 +441,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if saveCmd != nil {
 			return m, saveCmd
 		}
-		if m.generating || m.tooSmall || m.savingSettings {
+		if m.generating || m.tooSmall || m.savingSettings || m.savingConfiguration {
 			if key == "ctrl+c" {
 				return m, m.requestQuit()
 			}
@@ -338,6 +449,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, nil
+		}
+		if m.configureOpen {
+			return m, m.updateConfigure(key, now)
 		}
 		if m.historyOpen {
 			switch key {
@@ -396,10 +510,17 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.requestQuit()
 		case "ctrl+l":
 			return m, nil
+		case "ctrl+k":
+			m.openConfigure(configureTestTab, now)
+			return m, nil
+		case "?":
+			m.openConfigure(configureHelpTab, now)
+			return m, nil
 		case "ctrl+p":
 			if !m.settingsOpen {
 				m.settingsOpen = true
 				m.draftSettings = m.saved
+				m.dirty = make(map[int]bool)
 				m.message = ""
 				_ = m.session.Apply(SessionInput{Kind: InputPause, Reason: "settings", AtNS: now})
 				return m, nil
@@ -473,6 +594,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				advanceSetting(&m.draftSettings, m.selected)
 				m.dirty[m.selected] = true
 			} else if m.session.State == SessionCompleted || m.session.State == SessionExpired {
+				if m.launchOptions.OneShot {
+					m.successfulExit = true
+					return m, m.requestQuit()
+				}
 				return m, m.requestNextTest()
 			}
 			return m, nil
@@ -510,9 +635,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				p := m.session.prompt()
 				if !(m.session.Cursor > 0 && m.session.Cursor < len(p) && p[m.session.Cursor-1] == ' ' && p[m.session.Cursor] != ' ') {
 					_ = m.session.Apply(SessionInput{Kind: InputSkip, AtNS: now})
+					m.ensureTimedBuffer()
 				}
 			} else {
 				_ = m.session.Apply(SessionInput{Kind: InputText, Text: " ", AtNS: now})
+				m.ensureTimedBuffer()
 				m.refreshMeaningful()
 			}
 			return m, m.markResultReady(now)
@@ -537,12 +664,486 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, r := range text {
 			if unicode.IsPrint(r) {
 				_ = m.session.Apply(SessionInput{Kind: InputText, Text: string(r), AtNS: now})
+				m.ensureTimedBuffer()
 				m.refreshMeaningful()
 			}
 		}
 		return m, m.markResultReady(now)
 	}
 	return m, nil
+}
+
+func configurationOrDefault(configuration Configuration, saved runtimeSettings) Configuration {
+	if configuration.Version == 0 {
+		configuration = DefaultConfiguration()
+		if saved != (runtimeSettings{}) {
+			configuration.Settings = saved
+		}
+	}
+	if configuration.DiscoveredHints == nil {
+		configuration.DiscoveredHints = []string{}
+	}
+	return configuration
+}
+
+func hasHint(configuration Configuration, id string) bool {
+	for _, discovered := range configuration.DiscoveredHints {
+		if discovered == id {
+			return true
+		}
+	}
+	return false
+}
+
+func discoverHint(configuration *Configuration, id string) bool {
+	if configuration == nil || hasHint(*configuration, id) {
+		return false
+	}
+	configuration.DiscoveredHints = append(configuration.DiscoveredHints, id)
+	sort.Strings(configuration.DiscoveredHints)
+	return true
+}
+
+func (m *appModel) openConfigure(tab int, now int64) {
+	if m.settingsOpen {
+		return
+	}
+	m.configuration = configurationOrDefault(m.configuration, m.saved)
+	m.draftConfiguration = m.configuration
+	m.configurationDirty = make(map[string]bool)
+	m.configureOpen = true
+	m.configureTab = tab
+	m.configureSelected = 0
+	m.configureEditing = ""
+	m.configureInput = ""
+	m.configurePreview = false
+	m.configureConfirm = ""
+	m.configureMessage = ""
+	hint := hintConfigure
+	if tab == configureHelpTab {
+		hint = hintHelp
+	}
+	if m.showFirstRunHints {
+		for _, id := range []string{hintConfigure, hintSettings, hintHelp} {
+			if discoverHint(&m.draftConfiguration, id) {
+				m.configurationDirty["discoveredHints"] = true
+			}
+		}
+	}
+	if discoverHint(&m.draftConfiguration, hint) {
+		m.configurationDirty["discoveredHints"] = true
+	}
+	_ = m.session.Apply(SessionInput{Kind: InputPause, Reason: "configure", AtNS: now})
+}
+
+func configureSpecificRows(tab int) int {
+	switch tab {
+	case configureTestTab:
+		return 3
+	case configureTypingTab:
+		return 2
+	case configureDisplayTab:
+		return 4
+	case configureDataTab:
+		return 3
+	case configureHelpTab:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func configureRowCount(tab int) int {
+	return configureSpecificRows(tab) + 4
+}
+
+func (m *appModel) closeConfigure(now int64) {
+	m.configureOpen = false
+	m.configurePreview = false
+	m.configureConfirm = ""
+	m.configureEditing = ""
+	m.configureInput = ""
+	m.configureMessage = ""
+	m.configurationDirty = nil
+	m.draftConfiguration = Configuration{}
+	_ = m.session.Apply(SessionInput{Kind: InputResume, Reason: "configure", AtNS: now})
+}
+
+func (m *appModel) updateConfigure(key string, now int64) tea.Cmd {
+	if key == "ctrl+c" {
+		return m.requestQuit()
+	}
+	if m.configureConfirm != "" {
+		switch key {
+		case "enter", "y", "Y":
+			confirmation := m.configureConfirm
+			m.configureConfirm = ""
+			if confirmation == "reset-all" {
+				m.draftConfiguration = DefaultConfiguration()
+				m.configurationDirty = map[string]bool{
+					"settings": true, "test": true, "appearance": true, "discoveredHints": true,
+				}
+			}
+			return m.startConfiguration()
+		case "esc", "escape", "n", "N":
+			m.configureConfirm = ""
+		}
+		return nil
+	}
+	if m.configurePreview {
+		if key == "esc" || key == "escape" || key == "enter" || key == "p" {
+			m.configurePreview = false
+		}
+		return nil
+	}
+	if m.configureEditing != "" {
+		switch key {
+		case "esc", "escape":
+			m.configureEditing = ""
+			m.configureInput = ""
+			m.configureMessage = ""
+		case "backspace":
+			if len(m.configureInput) > 0 {
+				m.configureInput = m.configureInput[:len(m.configureInput)-1]
+			}
+		case "enter":
+			value, err := strconv.Atoi(m.configureInput)
+			if err != nil {
+				m.configureMessage = "Enter a whole number."
+				return nil
+			}
+			switch m.configureEditing {
+			case "duration":
+				if value < 5 || value > 3600 {
+					m.configureMessage = "Duration must be between 5 and 3600 seconds."
+					return nil
+				}
+				m.draftConfiguration.Test.DurationSeconds = value
+				m.configurationDirty["test.durationSeconds"] = true
+			case "count":
+				if value < 1 || value > 500 {
+					m.configureMessage = "Count must be between 1 and 500 words."
+					return nil
+				}
+				m.draftConfiguration.Test.Count = value
+				m.configurationDirty["test.count"] = true
+			}
+			m.configureEditing = ""
+			m.configureInput = ""
+			m.configureMessage = ""
+		default:
+			if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+				m.configureInput += key
+			}
+		}
+		return nil
+	}
+
+	switch key {
+	case "esc", "escape":
+		m.closeConfigure(now)
+	case "tab":
+		m.configureTab = (m.configureTab + 1) % configureTabCount
+		m.configureSelected = 0
+		if m.configureTab == configureHelpTab && discoverHint(&m.draftConfiguration, hintHelp) {
+			m.configurationDirty["discoveredHints"] = true
+		}
+	case "shift+tab":
+		m.configureTab = (m.configureTab + configureTabCount - 1) % configureTabCount
+		m.configureSelected = 0
+	case "up":
+		count := configureRowCount(m.configureTab)
+		m.configureSelected = (m.configureSelected + count - 1) % count
+	case "down":
+		count := configureRowCount(m.configureTab)
+		m.configureSelected = (m.configureSelected + 1) % count
+	case "enter", "space":
+		return m.activateConfigureRow(key, now)
+	case "p":
+		m.configurePreview = true
+	case "s":
+		return m.requestConfigurationStart()
+	}
+	return nil
+}
+
+func cyclePreset(current int, presets []int) int {
+	for i, preset := range presets {
+		if current == preset {
+			return presets[(i+1)%len(presets)]
+		}
+	}
+	return presets[0]
+}
+
+func (m *appModel) markConfigurationDirty(path string) {
+	if m.configurationDirty == nil {
+		m.configurationDirty = make(map[string]bool)
+	}
+	m.configurationDirty[path] = true
+	m.configureMessage = ""
+}
+
+func (m *appModel) activateConfigureRow(key string, now int64) tea.Cmd {
+	specific := configureSpecificRows(m.configureTab)
+	if m.configureSelected >= specific {
+		switch m.configureSelected - specific {
+		case 0:
+			m.resetConfigureSection()
+		case 1:
+			m.configurePreview = true
+		case 2:
+			return m.requestConfigurationStart()
+		case 3:
+			m.closeConfigure(now)
+		}
+		return nil
+	}
+
+	switch m.configureTab {
+	case configureTestTab:
+		switch m.configureSelected {
+		case 0:
+			switch m.draftConfiguration.Test.Mode {
+			case "timed":
+				m.draftConfiguration.Test.Mode = "count"
+				m.draftConfiguration.Test.Pack = "1000en"
+			case "count":
+				m.draftConfiguration.Test.Mode = "quote"
+				m.draftConfiguration.Test.Pack = "en"
+			default:
+				m.draftConfiguration.Test.Mode = "timed"
+				m.draftConfiguration.Test.Pack = "1000en"
+			}
+			m.markConfigurationDirty("test")
+		case 1:
+			if key == "enter" {
+				m.configureEditing = "duration"
+				m.configureInput = ""
+				m.configureMessage = "Type 5–3600 seconds, then press Enter."
+			} else {
+				m.draftConfiguration.Test.DurationSeconds = cyclePreset(
+					m.draftConfiguration.Test.DurationSeconds, []int{15, 30, 60, 120},
+				)
+				m.markConfigurationDirty("test.durationSeconds")
+			}
+		case 2:
+			if key == "enter" {
+				m.configureEditing = "count"
+				m.configureInput = ""
+				m.configureMessage = "Type 1–500 words, then press Enter."
+			} else {
+				m.draftConfiguration.Test.Count = cyclePreset(
+					m.draftConfiguration.Test.Count, []int{10, 25, 50, 100},
+				)
+				m.markConfigurationDirty("test.count")
+			}
+		}
+	case configureTypingTab:
+		if m.configureSelected == 0 {
+			m.draftConfiguration.Settings.SkipWord = !m.draftConfiguration.Settings.SkipWord
+			m.markConfigurationDirty("settings.skipWord")
+		} else {
+			m.draftConfiguration.Settings.AllowBackspace = !m.draftConfiguration.Settings.AllowBackspace
+			m.markConfigurationDirty("settings.allowBackspace")
+		}
+	case configureDisplayTab:
+		switch m.configureSelected {
+		case 0:
+			m.draftConfiguration.Settings.ShowWPM = !m.draftConfiguration.Settings.ShowWPM
+			m.markConfigurationDirty("settings.showWPM")
+		case 1:
+			m.draftConfiguration.Settings.BlockCursor = !m.draftConfiguration.Settings.BlockCursor
+			m.markConfigurationDirty("settings.blockCursor")
+		case 2:
+			m.draftConfiguration.Settings.BoldTypedText = !m.draftConfiguration.Settings.BoldTypedText
+			m.markConfigurationDirty("settings.boldTypedText")
+		case 3:
+			advanceSetting(&m.draftConfiguration.Settings, settingWordHighlighting)
+			m.markConfigurationDirty("settings.highlight")
+		}
+	case configureDataTab:
+		switch m.configureSelected {
+		case 0:
+			m.draftConfiguration.Test = DefaultConfiguration().Test
+			m.markConfigurationDirty("test")
+		case 1:
+			m.draftConfiguration.Appearance = DefaultConfiguration().Appearance
+			m.markConfigurationDirty("appearance")
+		case 2:
+			m.configureConfirm = "reset-all"
+		}
+	case configureHelpTab:
+		for _, id := range []string{hintConfigure, hintSettings, hintHelp} {
+			discoverHint(&m.draftConfiguration, id)
+		}
+		m.markConfigurationDirty("discoveredHints")
+	}
+	return nil
+}
+
+func (m *appModel) resetConfigureSection() {
+	defaults := DefaultConfiguration()
+	switch m.configureTab {
+	case configureTestTab, configureContentTab:
+		m.draftConfiguration.Test = defaults.Test
+		m.markConfigurationDirty("test")
+	case configureTypingTab:
+		m.draftConfiguration.Settings.SkipWord = defaults.Settings.SkipWord
+		m.draftConfiguration.Settings.AllowBackspace = defaults.Settings.AllowBackspace
+		m.markConfigurationDirty("settings.skipWord")
+		m.markConfigurationDirty("settings.allowBackspace")
+	case configureDisplayTab:
+		m.draftConfiguration.Settings.ShowWPM = defaults.Settings.ShowWPM
+		m.draftConfiguration.Settings.BlockCursor = defaults.Settings.BlockCursor
+		m.draftConfiguration.Settings.BoldTypedText = defaults.Settings.BoldTypedText
+		m.draftConfiguration.Settings.Highlight = defaults.Settings.Highlight
+		m.draftConfiguration.Appearance.Theme = defaults.Appearance.Theme
+		m.draftConfiguration.Appearance.Focus = defaults.Appearance.Focus
+		m.draftConfiguration.Appearance.ShowErrors = defaults.Appearance.ShowErrors
+		m.draftConfiguration.Appearance.ReducedMotion = defaults.Appearance.ReducedMotion
+		for _, path := range []string{
+			"settings.showWPM", "settings.blockCursor", "settings.boldTypedText",
+			"settings.highlight", "appearance.theme", "appearance.focus",
+			"appearance.showErrors", "appearance.reducedMotion",
+		} {
+			m.markConfigurationDirty(path)
+		}
+	case configureSoundTab:
+		m.draftConfiguration.Appearance.KeySound = defaults.Appearance.KeySound
+		m.draftConfiguration.Appearance.ErrorSound = defaults.Appearance.ErrorSound
+		m.draftConfiguration.Appearance.CompletionSound = defaults.Appearance.CompletionSound
+		m.draftConfiguration.Appearance.PBSound = defaults.Appearance.PBSound
+		for _, path := range []string{
+			"appearance.keySound", "appearance.errorSound",
+			"appearance.completionSound", "appearance.pbSound",
+		} {
+			m.markConfigurationDirty(path)
+		}
+	case configureDataTab, configureHelpTab:
+		m.draftConfiguration.DiscoveredHints = append([]string(nil), defaults.DiscoveredHints...)
+		m.markConfigurationDirty("discoveredHints")
+	}
+	m.configureMessage = "Section reset in the draft. Start to save it."
+}
+
+func (m *appModel) requestConfigurationStart() tea.Cmd {
+	if err := ValidateSavedTest(m.draftConfiguration.Test); err != nil {
+		m.configureMessage = err.Error()
+		return nil
+	}
+	if m.meaningful {
+		m.configureConfirm = "start"
+		return nil
+	}
+	return m.startConfiguration()
+}
+
+func (m *appModel) startConfiguration() tea.Cmd {
+	draft := m.draftConfiguration
+	if err := ValidateSavedTest(draft.Test); err != nil {
+		m.configureMessage = err.Error()
+		return nil
+	}
+	m.markConfigurationDirty("test")
+	dirty := make([]string, 0, len(m.configurationDirty))
+	for path, changed := range m.configurationDirty {
+		if changed {
+			dirty = append(dirty, path)
+		}
+	}
+	sort.Strings(dirty)
+	m.savingConfiguration = true
+	m.configureMessage = ""
+	return func() tea.Msg {
+		cfg, err := ResolveLaunch(draft, testOptions{StdinIsTerminal: true, TimeoutSeconds: -1}, nil)
+		if err != nil {
+			return configurationStartedMsg{err: fmt.Errorf("validate test: %w", err)}
+		}
+		generate, err := prepareTestGenerator(cfg, nil)
+		if err != nil {
+			return configurationStartedMsg{err: fmt.Errorf("load test content: %w", err)}
+		}
+		test := generate()
+		if test == nil {
+			return configurationStartedMsg{err: fmt.Errorf("generate test content: no content available")}
+		}
+		attemptID, err := newSessionID()
+		if err != nil {
+			return configurationStartedMsg{err: err}
+		}
+		promptID, err := newSessionID()
+		if err != nil {
+			return configurationStartedMsg{err: err}
+		}
+		committed, err := commitConfiguration(RUNTIME_SETTINGS_DB, draft, dirty)
+		if err != nil {
+			return configurationStartedMsg{err: fmt.Errorf("save configuration: %w", err)}
+		}
+		return configurationStartedMsg{
+			configuration: committed, test: test, attemptID: attemptID, promptID: promptID,
+		}
+	}
+}
+
+func timedRefillFrontier(prompt []rune, start, wordsToVisit int) int {
+	if start < 0 {
+		start = 0
+	}
+	if wordsToVisit <= 0 {
+		return start
+	}
+	inWord := false
+	completed := 0
+	for index := start; index < len(prompt); index++ {
+		if unicode.IsSpace(prompt[index]) {
+			if inWord {
+				completed++
+				if completed == wordsToVisit {
+					return index + 1
+				}
+				inWord = false
+			}
+		} else {
+			inWord = true
+		}
+	}
+	return len(prompt)
+}
+
+func (m *appModel) resetTimedRefillFrontier() {
+	m.timedRefillCursor = 0
+	if m.session == nil || m.session.Test == nil || m.session.Test.Config.Mode != timedMode {
+		return
+	}
+	m.timedRefillCursor = timedRefillFrontier(
+		m.session.prompt(), 0, m.session.Test.Config.WordCount-49,
+	)
+}
+
+func (m *appModel) ensureTimedBuffer() {
+	if m.session == nil || m.session.Test == nil || m.session.Test.Config.Mode != timedMode {
+		return
+	}
+	if m.timedRefillCursor == 0 {
+		m.resetTimedRefillFrontier()
+	}
+	if m.session.Cursor < m.timedRefillCursor {
+		return
+	}
+	previousFrontier := m.timedRefillCursor
+	addition := m.session.Test.appendTimedWords(100)
+	if addition == "" {
+		return
+	}
+	addedRunes := []rune(" " + addition)
+	m.session.promptText = m.session.Test.Segments[0].Text
+	m.session.promptRunes = append(m.session.promptRunes, addedRunes...)
+	m.session.Typed = append(m.session.Typed, make([]rune, len(addedRunes))...)
+	m.timedRefillCursor = timedRefillFrontier(m.session.prompt(), previousFrontier, 100)
+	if m.session.State == SessionCompleted {
+		m.session.State = SessionRunning
+	}
 }
 
 func (m *appModel) beginPracticeReview() tea.Cmd {
@@ -838,35 +1439,76 @@ func (m *appModel) expireIfNeeded(now int64) tea.Cmd {
 	return nil
 }
 
-func (m *appModel) markResultReady(now int64) tea.Cmd {
-	if (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.result == nil && m.resultReadyAtNS == 0 {
-		m.resultReadyAtNS = now
-		result, err := FinishResult(m.session.Snapshot(), time.Now().UTC().UnixMilli())
-		if err == nil {
-			m.result = &result
-			if m.practiceActive && m.practicePlan != nil {
-				m.practiceComparisons = ComparePractice(*m.practicePlan, result)
-			}
-			if m.historyRoot != "" && m.session.Test != nil && m.session.Test.EligibleForHistory {
-				m.historyRecord = ProjectHistory(result, m.session.Test.Origin, PrivacyPolicy{})
-				if m.practiceActive && m.practicePlan != nil {
-					m.historyRecord.PracticeDetail = &PracticeDetail{
-						ParentID:          m.practicePlan.ParentID,
-						WindowStartUnixMS: m.practicePlan.WindowStartUnixMS,
-						SampleSessions:    m.practicePlan.SampleSessions,
-						Items:             append([]PracticeItem(nil), m.practicePlan.Items...),
-						Comparisons:       append([]PracticeComparison(nil), m.practiceComparisons...),
-					}
-				}
-				m.saveState = SavePending
-				m.saveError = ""
-				return m.saveHistory()
-			}
-		} else {
-			m.testError = err.Error()
-		}
+func legacyResultFromSession(sessionResult SessionResult, session Session) result {
+	visited := session.Cursor
+	if visited > len(session.promptRunes) {
+		visited = len(session.promptRunes)
 	}
-	return nil
+	legacy := result{
+		Timestamp: sessionResult.FinishedUnixMS / 1000,
+		Mistakes:  extractMistypedWords(session.promptRunes[:visited], session.Typed[:visited]),
+	}
+	if legacy.Mistakes == nil {
+		legacy.Mistakes = []mistake{}
+	}
+	if sessionResult.Measurements.WPM != nil {
+		legacy.Wpm = int(math.Round(*sessionResult.Measurements.WPM))
+	}
+	if sessionResult.Measurements.CPM != nil {
+		legacy.Cpm = int(math.Round(*sessionResult.Measurements.CPM))
+	}
+	if sessionResult.Measurements.Accuracy != nil {
+		legacy.Accuracy = *sessionResult.Measurements.Accuracy
+	}
+	return legacy
+}
+
+func (m *appModel) markResultReady(now int64) tea.Cmd {
+	if (m.session.State != SessionCompleted && m.session.State != SessionExpired) || m.result != nil || m.resultReadyAtNS != 0 {
+		return nil
+	}
+	m.resultReadyAtNS = now
+	snapshot := m.session.Snapshot()
+	sessionResult, err := FinishResult(snapshot, time.Now().UTC().UnixMilli())
+	if err != nil {
+		m.testError = err.Error()
+		return nil
+	}
+	m.result = &sessionResult
+	m.outputResults = append(m.outputResults, legacyResultFromSession(sessionResult, snapshot))
+	if m.practiceActive && m.practicePlan != nil {
+		m.practiceComparisons = ComparePractice(*m.practicePlan, sessionResult)
+	}
+
+	var saveCmd tea.Cmd
+	if m.historyRoot != "" && m.session.Test != nil && m.session.Test.EligibleForHistory {
+		m.historyRecord = ProjectHistory(sessionResult, m.session.Test.Origin, PrivacyPolicy{})
+		if m.practiceActive && m.practicePlan != nil {
+			m.historyRecord.PracticeDetail = &PracticeDetail{
+				ParentID:          m.practicePlan.ParentID,
+				WindowStartUnixMS: m.practicePlan.WindowStartUnixMS,
+				SampleSessions:    m.practicePlan.SampleSessions,
+				Items:             append([]PracticeItem(nil), m.practicePlan.Items...),
+				Comparisons:       append([]PracticeComparison(nil), m.practiceComparisons...),
+			}
+		}
+		m.saveState = SavePending
+		m.saveError = ""
+		saveCmd = m.saveHistory()
+	}
+	if !m.launchOptions.NoReport {
+		return saveCmd
+	}
+	if m.launchOptions.OneShot {
+		m.successfulExit = true
+		if saveCmd != nil {
+			m.exitRequested = true
+			return tea.Batch(saveCmd, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return historyExitTimeoutMsg{} }))
+		}
+		m.quitting = true
+		return tea.Quit
+	}
+	return tea.Batch(saveCmd, m.requestNextTest())
 }
 
 func appCursor(x, y int, block bool) *tea.Cursor {
@@ -1033,6 +1675,7 @@ func (m *appModel) activateTest(attemptID string) error {
 	m.attempts[entry.promptID] = attemptID
 	m.session = session
 	m.timeLimit = entry.test.Config.TimeLimit
+	m.resetTimedRefillFrontier()
 	m.meaningful = false
 	m.processedEventCount = 0
 	m.textInputCount = 0
@@ -1058,6 +1701,7 @@ func (m *appModel) restartCurrentAttempt() error {
 	m.session = NewSession(m.session.Test, attemptID, m.session.PromptID)
 	m.session.AllowBackspace = m.settings.AllowBackspace
 	m.session.SkipWord = m.settings.SkipWord
+	m.resetTimedRefillFrontier()
 	m.session.RetryOf = previousAttempt
 	if m.attempts == nil {
 		m.attempts = make(map[string]string)
@@ -1111,6 +1755,129 @@ func (m *appModel) requestNextTest() tea.Cmd {
 	}
 }
 
+func configureMarker(selected, row int) string {
+	if selected == row {
+		return "> "
+	}
+	return "  "
+}
+
+func configureSettingValue(settings runtimeSettings, row int, overrides settingsOverrides, flags flagValues) string {
+	saved := settingValue(settings, row)
+	if !settingIsOverridden(row, overrides) {
+		return saved
+	}
+	active := settingValue(effectiveRuntimeSettings(settings, overrides, flags), row)
+	return fmt.Sprintf("%s saved · %s active CLI", saved, active)
+}
+
+func (m appModel) renderConfigure(b *strings.Builder) {
+	if m.configureConfirm == "start" {
+		b.WriteString("Replace the current test?\n\n")
+		b.WriteString("Your typed progress will be replaced by a fresh test. The current session is unchanged until saving succeeds.\n\n")
+		b.WriteString("Enter/y confirm · Escape/n return")
+		return
+	}
+	if m.configureConfirm == "reset-all" {
+		b.WriteString("Reset all settings?\n\n")
+		b.WriteString("Test, appearance, typing, display, and hint preferences will return to defaults. The current typed progress will be replaced by a fresh default test. History is not changed.\n\n")
+		b.WriteString("Enter/y confirm · Escape/n return")
+		return
+	}
+	if m.configurePreview {
+		test := m.draftConfiguration.Test
+		fmt.Fprintf(b, "Preview\n\nMode          %s\nPack          %s\nDuration      %ds\nWord count    %d\nDifficulty    %s\n\n",
+			test.Mode, test.Pack, test.DurationSeconds, test.Count, test.Difficulty)
+		b.WriteString("Preview does not save or replace the current test.\n\nEscape/Enter return")
+		return
+	}
+
+	b.WriteString("Configure\n")
+	for i, label := range configureTabLabels {
+		if i == m.configureTab {
+			fmt.Fprintf(b, " [%s]", label)
+		} else {
+			fmt.Fprintf(b, "  %s", label)
+		}
+	}
+	b.WriteString("\n\n")
+
+	row := 0
+	switch m.configureTab {
+	case configureTestTab:
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Mode", m.draftConfiguration.Test.Mode)
+		row++
+		duration := fmt.Sprintf("%ds", m.draftConfiguration.Test.DurationSeconds)
+		if m.configureEditing == "duration" {
+			duration = m.configureInput + "▏"
+		} else if m.draftConfiguration.Test.Mode != "timed" {
+			duration += " (saved for timed)"
+		}
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Duration", duration)
+		row++
+		count := fmt.Sprintf("%d words", m.draftConfiguration.Test.Count)
+		if m.configureEditing == "count" {
+			count = m.configureInput + "▏"
+		} else if m.draftConfiguration.Test.Mode != "count" {
+			count += " (saved for count)"
+		}
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Word count", count)
+		row++
+	case configureContentTab:
+		pack, description := m.draftConfiguration.Test.Pack, "English 1k"
+		if m.draftConfiguration.Test.Mode == "quote" {
+			pack, description = "en", "English quotes"
+		}
+		fmt.Fprintf(b, "  Pack                   %s · %s\n", pack, description)
+		b.WriteString("  The saved embedded pack is active; private files and stdin are never remembered.\n")
+	case configureTypingTab:
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Skip word on Space", configureSettingValue(m.draftConfiguration.Settings, settingSkipWord, m.overrides, m.flags))
+		row++
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Allow Backspace", configureSettingValue(m.draftConfiguration.Settings, settingAllowBackspace, m.overrides, m.flags))
+		row++
+	case configureDisplayTab:
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Show WPM", configureSettingValue(m.draftConfiguration.Settings, settingShowWPM, m.overrides, m.flags))
+		row++
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Cursor style", configureSettingValue(m.draftConfiguration.Settings, settingCursorStyle, m.overrides, m.flags))
+		row++
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Typed text weight", configureSettingValue(m.draftConfiguration.Settings, settingTypedTextWeight, m.overrides, m.flags))
+		row++
+		fmt.Fprintf(b, "%s%-22s %s\n", configureMarker(m.configureSelected, row), "Word highlighting", configureSettingValue(m.draftConfiguration.Settings, settingWordHighlighting, m.overrides, m.flags))
+		row++
+		fmt.Fprintf(b, "  Theme                  %s\n", m.draftConfiguration.Appearance.Theme)
+	case configureSoundTab:
+		b.WriteString("  Sound is off. No sound controls are available in this configuration screen.\n")
+	case configureDataTab:
+		fmt.Fprintf(b, "%sReset test configuration\n", configureMarker(m.configureSelected, row))
+		row++
+		fmt.Fprintf(b, "%sReset appearance\n", configureMarker(m.configureSelected, row))
+		row++
+		fmt.Fprintf(b, "%sReset all settings…\n", configureMarker(m.configureSelected, row))
+		row++
+		b.WriteString("  History is stored separately and is never removed by these resets.\n")
+	case configureHelpTab:
+		fmt.Fprintf(b, "%sDismiss first-run hints\n", configureMarker(m.configureSelected, row))
+		row++
+		b.WriteString("\n  Ctrl-K Configure · Ctrl-P live Settings · ? Help\n")
+		b.WriteString("  Tab/Shift-Tab groups · Up/Down rows · Enter/Space change · Escape cancel\n")
+	}
+
+	fmt.Fprintf(b, "\n%sReset current section\n", configureMarker(m.configureSelected, row))
+	row++
+	fmt.Fprintf(b, "%sPreview\n", configureMarker(m.configureSelected, row))
+	row++
+	fmt.Fprintf(b, "%sStart\n", configureMarker(m.configureSelected, row))
+	row++
+	fmt.Fprintf(b, "%sCancel\n", configureMarker(m.configureSelected, row))
+	b.WriteString("\nTab/Shift-Tab groups · Up/Down select · Enter/Space change")
+	if m.savingConfiguration {
+		b.WriteString("\nSaving configuration and preparing fresh content…")
+	}
+	if m.configureMessage != "" {
+		fmt.Fprintf(b, "\n%s", m.configureMessage)
+	}
+}
+
 func (m appModel) View() tea.View {
 	var b strings.Builder
 	var nativeCursor *tea.Cursor
@@ -1122,6 +1889,8 @@ func (m appModel) View() tea.View {
 	}
 	if m.tooSmall {
 		b.WriteString("Terminal too small — requires 52×14. Resize or Ctrl-C to quit.")
+	} else if m.configureOpen {
+		m.renderConfigure(&b)
 	} else if m.restartPending {
 		b.WriteString("Restart this test? Press Escape again within 1 second to retry; wait to resume.")
 	} else if m.testError != "" {
@@ -1251,6 +2020,12 @@ func (m appModel) View() tea.View {
 			}
 		}
 		b.WriteString("\n\nUp/Down select · Left/Right page · t regular/practice · Escape results")
+	} else if (m.session.State == SessionCompleted || m.session.State == SessionExpired) && m.launchOptions.NoReport {
+		if m.launchOptions.OneShot {
+			b.WriteString("Finishing test…")
+		} else {
+			b.WriteString("Preparing next test…")
+		}
 	} else if m.session.State == SessionCompleted || m.session.State == SessionExpired {
 		result := m.result
 		if result == nil {
@@ -1300,7 +2075,17 @@ func (m appModel) View() tea.View {
 	} else {
 		cfg := m.session.Test.Config
 		live, _ := Measure(*m.session)
-		fmt.Fprintf(&b, "Words · %d words · %d groups · %d/%d chars · total errors %d\n\n", cfg.WordCount, cfg.Groups, m.session.Cursor, len(m.session.Typed), live.Errors.Total)
+		switch cfg.Mode {
+		case timedMode:
+			fmt.Fprintf(&b, "Timed · %.0fs · %d words buffered · %d/%d chars · total errors %d\n\n",
+				cfg.TimeLimit.Seconds(), cfg.WordCount, m.session.Cursor, len(m.session.Typed), live.Errors.Total)
+		case quoteMode:
+			fmt.Fprintf(&b, "Quote · %s · %d/%d chars · total errors %d\n\n",
+				cfg.Pack, m.session.Cursor, len(m.session.Typed), live.Errors.Total)
+		default:
+			fmt.Fprintf(&b, "Count · %d words · %d/%d chars · total errors %d\n\n",
+				cfg.WordCount, m.session.Cursor, len(m.session.Typed), live.Errors.Total)
+		}
 		if m.settings.ShowWPM && m.session.ActiveNS >= int64(time.Second) && live.WPM != nil {
 			fmt.Fprintf(&b, "WPM %s\n\n", metricDisplay(live.WPM, ""))
 		}
@@ -1405,7 +2190,13 @@ func (m appModel) View() tea.View {
 			}
 			b.WriteRune('…')
 		}
-		fmt.Fprintf(&b, "\n\nActive %.1fs · Space skip · Ctrl-P settings · Esc restart", float64(m.session.ActiveNS)/1e9)
+		fmt.Fprintf(&b, "\n\nActive %.1fs · Space skip · Ctrl-K configure · Ctrl-P settings · Esc restart", float64(m.session.ActiveNS)/1e9)
+		if m.showFirstRunHints || !hasHint(m.configuration, hintConfigure) || !hasHint(m.configuration, hintSettings) || !hasHint(m.configuration, hintHelp) {
+			b.WriteString("\nHint: Ctrl-K Configure · Ctrl-P Settings · ? Help")
+		}
+		if m.hintSaveError != "" {
+			fmt.Fprintf(&b, "\n%s", m.hintSaveError)
+		}
 	}
 	v := tea.NewView(charmViewStyle.Render(b.String()))
 	v.ForegroundColor = charmForegroundColor
@@ -1478,30 +2269,88 @@ func (m *appModel) closeSettings(now int64) tea.Cmd {
 
 func (m *appModel) saveSettings() tea.Cmd {
 	path := RUNTIME_SETTINGS_DB
-	saved, draft := m.saved, m.draftSettings
+	draft := m.draftSettings
 	dirty := make(map[int]bool, len(m.dirty))
 	for row, isDirty := range m.dirty {
 		dirty[row] = isDirty
 	}
+	baseConfiguration := configurationOrDefault(m.configuration, m.saved)
+	baseConfiguration.Settings = draft
 	m.savingSettings = true
 	return func() tea.Msg {
-		base, err := loadPersistedSettings(path)
+		committed, err := commitConfiguration(path, baseConfiguration, dirtySettingsPaths(dirty))
 		if err != nil {
-			if os.IsNotExist(err) {
-				base = saved
-			} else {
-				return settingsSavedMsg{err: fmt.Errorf("cannot load %s: %w", path, err)}
-			}
-		}
-		merged := mergeDirtySettings(base, draft, dirty)
-		if err := savePersistedSettings(path, merged); err != nil {
 			return settingsSavedMsg{err: fmt.Errorf("cannot save %s: %w", path, err)}
 		}
-		return settingsSavedMsg{settings: merged}
+		return settingsSavedMsg{configuration: committed, settings: committed.Settings}
 	}
 }
 
-func RunCharm(test *Test, saved runtimeSettings, overrides settingsOverrides, flags flagValues) ([]result, int, error) {
+func validCharmColor(value string) bool {
+	if len(value) != 7 || value[0] != '#' {
+		return false
+	}
+	_, err := strconv.ParseUint(value[1:], 16, 24)
+	return err == nil
+}
+
+func applyCharmTheme(name string) error {
+	if name == "" || name == "tt-dark" {
+		return nil
+	}
+	data, _, err := ResolveResource("themes", name)
+	if err != nil {
+		return fmt.Errorf("theme %q: %w", name, err)
+	}
+	theme := parseConfig(data)
+	for _, key := range []string{"fgcol", "bgcol", "hicol", "hicol2", "errcol"} {
+		if !validCharmColor(theme[key]) {
+			return fmt.Errorf("theme %q has invalid %s", name, key)
+		}
+	}
+	charmForegroundColor = lipgloss.Color(theme["fgcol"])
+	charmBackgroundColor = lipgloss.Color(theme["bgcol"])
+	charmViewStyle = lipgloss.NewStyle().Foreground(charmForegroundColor).Background(charmBackgroundColor)
+	currentWordStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme["hicol2"]))
+	nextWordStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme["hicol"]))
+	errorTextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme["errcol"])).Underline(true)
+	return nil
+}
+
+func emitCharmResults(output []result, options CharmLaunchOptions) error {
+	if options.JSON {
+		data, err := json.Marshal(output)
+		if err != nil {
+			return fmt.Errorf("encode JSON results: %w", err)
+		}
+		if _, err := fmt.Fprintln(os.Stdout, string(data)); err != nil {
+			return fmt.Errorf("write JSON results: %w", err)
+		}
+	}
+	if options.CSV {
+		for _, item := range output {
+			if _, err := fmt.Fprintf(os.Stdout, "test,%d,%d,%.2f,%d\n", item.Wpm, item.Cpm, item.Accuracy, item.Timestamp); err != nil {
+				return fmt.Errorf("write CSV results: %w", err)
+			}
+			for _, itemMistake := range item.Mistakes {
+				if _, err := fmt.Fprintf(os.Stdout, "mistake,%s,%s\n", itemMistake.Word, itemMistake.Typed); err != nil {
+					return fmt.Errorf("write CSV mistakes: %w", err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func RunCharm(test *Test, configuration Configuration, overrides settingsOverrides, flags flagValues, options CharmLaunchOptions) ([]result, int, error) {
+	if test == nil {
+		return nil, 1, fmt.Errorf("cannot start an empty test")
+	}
+	configuration = configurationOrDefault(configuration, configuration.Settings)
+	if err := applyCharmTheme(options.Theme); err != nil {
+		return nil, 1, err
+	}
+	saved := configuration.Settings
 	attempt, err := newSessionID()
 	if err != nil {
 		return nil, 1, err
@@ -1511,33 +2360,46 @@ func RunCharm(test *Test, saved runtimeSettings, overrides settingsOverrides, fl
 		return nil, 1, err
 	}
 	m := appModel{
-		session:       NewSession(test, attempt, prompt),
-		saved:         saved,
-		settings:      effectiveRuntimeSettings(saved, overrides, flags),
-		draftSettings: saved,
-		overrides:     overrides,
-		flags:         flags,
-		timeLimit:     test.Config.TimeLimit,
-		tests:         []*testEntry{{test: test, promptID: prompt}},
-		generateTest:  newTestGenerator(test.Config, nil),
-		attempts:      map[string]string{prompt: attempt},
+		session:            NewSession(test, attempt, prompt),
+		saved:              saved,
+		settings:           effectiveRuntimeSettings(saved, overrides, flags),
+		draftSettings:      saved,
+		configuration:      configuration,
+		draftConfiguration: configuration,
+		showFirstRunHints:  !hasHint(configuration, hintConfigure) || !hasHint(configuration, hintSettings) || !hasHint(configuration, hintHelp),
+		overrides:          overrides,
+		flags:              flags,
+		launchOptions:      options,
+		timeLimit:          test.Config.TimeLimit,
+		tests:              []*testEntry{{test: test, promptID: prompt}},
+		generateTest:       newTestGenerator(test.Config, nil),
+		attempts:           map[string]string{prompt: attempt},
 	}
 	m.historyRoot = HistoryRoot()
 	m.session.AllowBackspace = m.settings.AllowBackspace
 	m.session.SkipWord = m.settings.SkipWord
+	m.resetTimedRefillFrontier()
 	final, err := tea.NewProgram(m).Run()
 	if err != nil {
 		return nil, 1, err
 	}
-	if finalModel, ok := final.(appModel); ok && finalModel.quitting {
-		saveError := finalModel.backgroundSaveError
-		if finalModel.saveState == SaveFailed {
-			saveError = finalModel.saveError
-		}
-		if saveError != "" {
-			fmt.Fprintf(os.Stderr, "not stored: %s\n", saveError)
-		}
-		return nil, 1, nil
+	finalModel, ok := final.(appModel)
+	if !ok {
+		return nil, 1, fmt.Errorf("unexpected Charm model %T", final)
 	}
-	return nil, 0, nil
+	if err := emitCharmResults(finalModel.outputResults, options); err != nil {
+		return finalModel.outputResults, 1, err
+	}
+	rc := 0
+	if finalModel.quitting && !finalModel.successfulExit {
+		rc = 1
+	}
+	saveError := finalModel.backgroundSaveError
+	if finalModel.saveState == SaveFailed {
+		saveError = finalModel.saveError
+	}
+	if saveError != "" {
+		fmt.Fprintf(os.Stderr, "not stored: %s\n", saveError)
+	}
+	return finalModel.outputResults, rc, nil
 }

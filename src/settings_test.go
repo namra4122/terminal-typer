@@ -299,7 +299,7 @@ func TestInvalidRuntimeSettingsWarnOnceAndUseDefaults(t *testing.T) {
 	validSettings := `{"showWPM":false,"skipWord":true,"allowBackspace":true,"blockCursor":false,"boldTypedText":false,"highlight":"current-and-next"}`
 	cases := map[string]string{
 		"invalid JSON":    `{`,
-		"unknown version": `{"version":2,"settings":` + validSettings + `}`,
+		"unknown version": `{"version":99,"settings":` + validSettings + `}`,
 		"invalid mode":    `{"version":1,"settings":{"showWPM":false,"skipWord":true,"allowBackspace":true,"blockCursor":false,"boldTypedText":false,"highlight":"sometimes"}}`,
 	}
 	for name, content := range cases {
@@ -314,8 +314,9 @@ func TestInvalidRuntimeSettingsWarnOnceAndUseDefaults(t *testing.T) {
 				t.Fatalf("fallback settings = %#v, want defaults", got)
 			}
 			if strings.Count(warnings.String(), "\n") != 1 ||
-				!strings.HasPrefix(warnings.String(), "tt: ignoring runtime settings: ") {
-				t.Fatalf("warning = %q, want exactly one runtime-settings warning", warnings.String())
+				!strings.HasPrefix(warnings.String(), "tt: ignoring runtime settings: ") ||
+				!strings.Contains(warnings.String(), "fix or move the file") {
+				t.Fatalf("warning = %q, want exactly one runtime-settings warning with recovery guidance", warnings.String())
 			}
 			unchanged, err := os.ReadFile(path)
 			if err != nil {
